@@ -69,6 +69,15 @@ st.markdown(
 )
 
 
+# Suporte resiliente a fragmentos nativos do Streamlit
+def fragment_auto(run_every=None):
+    if hasattr(st, "fragment"):
+        return st.fragment(run_every=run_every)
+    elif hasattr(st, "experimental_fragment"):
+        return st.experimental_fragment(run_every=run_every)
+    return lambda f: f
+
+
 # ---------------------------------------------------------
 # Gestão de Ficheiros Locais e Persistência
 # ---------------------------------------------------------
@@ -205,9 +214,9 @@ def guardar_stats_historico(stats_dict):
 
 
 # ---------------------------------------------------------
-# Câmbio EUR / USD em Tempo Real
+# Câmbio EUR / USD em Tempo Real (Cache Ultrarrápida: 5s)
 # ---------------------------------------------------------
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=5)
 def obter_taxa_eur_usd():
     try:
         forex = yf.Ticker("EURUSD=X")
@@ -251,7 +260,6 @@ def processar_ficheiro_importado(ficheiro):
             dados_apuramento["tipo_ficheiro"] = "XTB"
             excel = pd.ExcelFile(ficheiro)
 
-            # 1. Holdings Abertas
             open_sheet = next(
                 (
                     s
@@ -357,7 +365,6 @@ def processar_ficheiro_importado(ficheiro):
                             .reset_index()
                         )
 
-            # 2. Posições Fechadas (Vendas e IRS)
             closed_sheet = next(
                 (
                     s
@@ -449,7 +456,6 @@ def processar_ficheiro_importado(ficheiro):
                             }
                         )
 
-            # 3. Operações de Caixa (Dividendos e Retenções)
             cash_sheet = next(
                 (
                     s
@@ -521,7 +527,6 @@ def processar_ficheiro_importado(ficheiro):
             df_raw = pd.read_csv(ficheiro, encoding="utf-8-sig")
             df_raw.columns = [str(c).strip() for c in df_raw.columns]
 
-            # 1. Dividendos com discriminação Bruto e Retenção
             divs = df_raw[
                 df_raw["Action"]
                 .astype(str)
@@ -560,7 +565,6 @@ def processar_ficheiro_importado(ficheiro):
                     }
                 )
 
-            # Custos
             c_conv = pd.to_numeric(
                 df_raw.get("Currency conversion fee", 0.0), errors="coerce"
             ).sum()
@@ -569,7 +573,6 @@ def processar_ficheiro_importado(ficheiro):
             ).sum()
             dados_apuramento["fees_total"] = float(c_conv + c_ftt)
 
-            # 2. Vendas e IRS Anexo J
             sells = df_raw[
                 df_raw["Action"].isin(["Market sell", "Limit sell"])
             ].copy()
@@ -615,7 +618,6 @@ def processar_ficheiro_importado(ficheiro):
                     }
                 )
 
-            # 3. Posições Vivas (Holdings)
             df_sorted = df_raw.sort_values("Time (UTC)", ascending=True)
             carteira_calc = {}
             for _, r in df_sorted.iterrows():
@@ -671,9 +673,9 @@ def processar_ficheiro_importado(ficheiro):
 
 
 # ---------------------------------------------------------
-# Obtenção de Cotações e Dividendos Reais
+# Obtenção de Cotações em Tempo Real (Cache Ultrarrápida: 5s)
 # ---------------------------------------------------------
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=5)
 def obter_dados_mercado(tickers):
     dados = {}
     if not tickers:
@@ -761,25 +763,46 @@ def obter_dados_mercado(tickers):
 
 
 # ---------------------------------------------------------
-# Sidebar: Gestão de Carteira & Importação
+# Sidebar: Gestão de Carteira & Opções
 # ---------------------------------------------------------
 df_portfolio = carregar_portfolio()
 df_vendas_salvas = carregar_vendas_fechadas()
 df_divs_salvos = carregar_dividendos()
 stats_hist = carregar_stats_historico()
-taxa_eur_usd = obter_taxa_eur_usd()
 
 with st.sidebar:
     st.header("⚙️ Gestor de Carteira")
-    st.caption(f"💱 Câmbio atual: **1 EUR = {taxa_eur_usd:.4f} USD**")
 
-    # SELETOR GLOBAL DE RETENÇÃO FISCAL
+    # MÓDULO AO VIVO ULTRARRÁPIDO
+    st.markdown("### ⚡ Cotações ao Vivo")
+    auto_refresh = st.toggle(
+        "Atualização em Tempo Real",
+        value=True,
+        help="Atualiza as cotações e o valor da carteira automaticamente em segundo plano.",
+    )
+    intervalo_segundos = 5
+    if auto_refresh:
+        intervalo_segundos = st.select_slider(
+            "Frequência:",
+            options=[5, 10, 15, 30, 60],
+            value=5,
+            format_func=lambda s: f"{s}s (Direto)" if s == 5 else (f"{s}s" if s < 60 else f"{s//60} min"),
+        )
+        st.caption(f"🟢 **Modo Direto:** Atualiza a cada **{intervalo_segundos} segundos**.")
+    else:
+        st.caption("⚪ Pausado: atualização manual apenas.")
+
+    run_interval = intervalo_segundos if auto_refresh else None
+
+    st.markdown("---")
+
+    # SELETOR FISCAL DE DIVIDENDOS
     st.markdown("### 🏛️ Opção Fiscal de Dividendos")
     modo_retencao = st.radio(
         "Visualizar Dividendos:",
         ["Sem Retenção (Líquido)", "Com Retenção (Bruto)"],
         index=0,
-        help="Líquido: o valor real creditado na tua conta.\nBruto: o dividendo pago pela empresa antes do imposto retido na fonte.",
+        help="Líquido: o valor real creditado na conta.\nBruto: o dividendo pago pela empresa antes do imposto retido na fonte.",
     )
     is_bruto = "Bruto" in modo_retencao
 
@@ -999,350 +1022,383 @@ with st.sidebar:
                 st.rerun()
 
     st.markdown("---")
-    if st.button("🔄 Atualizar Cotações", use_container_width=True):
+    if st.button("🔄 Forçar Atualização Imediata", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
+
 # ---------------------------------------------------------
-# Processamento e Consolidação em EUR
+# PAINEL PRINCIPAL AUTOMÁTICO EM SEGUNDO PLANO
 # ---------------------------------------------------------
-tickers_lista = df_portfolio["Ticker"].tolist()
-market_data = obter_dados_mercado(tickers_lista)
+@fragment_auto(run_every=run_interval)
+def render_painel_principal():
+    df_port = carregar_portfolio()
+    df_vendas = carregar_vendas_fechadas()
+    df_divs = carregar_dividendos()
+    stats = carregar_stats_historico()
+    taxa_eur_usd = obter_taxa_eur_usd()
 
-dados_processados = []
-distribuicao_mensal_eur = {m: 0.0 for m in range(1, 13)}
+    tickers_lista = df_port["Ticker"].tolist()
+    market_data = obter_dados_mercado(tickers_lista)
 
-# Fator fiscal médio: se for bruto é 1.0, se for líquido desconta retenção estimada (~15% para ações e 0% para UCITS irlandeses)
-for _, row in df_portfolio.iterrows():
-    t = row["Ticker"]
-    shares = float(row["Shares"])
-    cost_input = float(row["Cost_Per_Share"])
-    currency_input = row.get("Currency", "EUR")
+    dados_processados = []
+    distribuicao_mensal_eur = {m: 0.0 for m in range(1, 13)}
 
-    m_info = market_data.get(t, {})
-    curr_price_native = m_info.get("Price_Native", 0.0)
-    prev_close_native = m_info.get(
-        "Prev_Close_Native", curr_price_native
-    )
-    day_pct = m_info.get("Day_Change_Pct", 0.0)
-    annual_div_native = m_info.get("Annual_Div_Native", 0.0)
-    div_yield = m_info.get("Div_Yield", 0.0) * 100
-    native_currency = m_info.get("Currency_Native", "EUR")
-    monthly_sched_native = m_info.get("Monthly_Schedule_Native", {})
+    for _, row in df_port.iterrows():
+        t = row["Ticker"]
+        shares = float(row["Shares"])
+        cost_input = float(row["Cost_Per_Share"])
+        currency_input = row.get("Currency", "EUR")
 
-    fator_conversao_eur = (
-        (1.0 / taxa_eur_usd) if native_currency == "USD" else 1.0
-    )
+        m_info = market_data.get(t, {})
+        curr_price_native = m_info.get("Price_Native", 0.0)
+        prev_close_native = m_info.get(
+            "Prev_Close_Native", curr_price_native
+        )
+        day_pct = m_info.get("Day_Change_Pct", 0.0)
+        annual_div_native = m_info.get("Annual_Div_Native", 0.0)
+        div_yield = m_info.get("Div_Yield", 0.0) * 100
+        native_currency = m_info.get("Currency_Native", "EUR")
+        monthly_sched_native = m_info.get("Monthly_Schedule_Native", {})
 
-    price_eur = curr_price_native * fator_conversao_eur
-    prev_close_eur = prev_close_native * fator_conversao_eur
-    cost_eur = (
-        (cost_input / taxa_eur_usd)
-        if currency_input == "USD"
-        else cost_input
-    )
-
-    invested_eur = shares * cost_eur
-    mkt_value_eur = shares * price_eur
-    unrealized_gl_eur = mkt_value_eur - invested_eur
-    total_return_pct = (
-        (unrealized_gl_eur / invested_eur) * 100 if invested_eur > 0 else 0.0
-    )
-    day_gl_eur = (
-        shares * (price_eur - prev_close_eur) if price_eur > 0 else 0.0
-    )
-
-    # Cálculo com ou sem retenção
-    fator_retencao = 0.85 if (native_currency == "USD" and not is_bruto) else 1.0
-    annual_dividend_eur = (
-        shares * (annual_div_native * fator_conversao_eur) * fator_retencao
-    )
-    yoc = (
-        (annual_dividend_eur / invested_eur) * 100 if invested_eur > 0 else 0.0
-    )
-
-    for m in range(1, 13):
-        distribuicao_mensal_eur[m] += (
-            monthly_sched_native.get(m, 0.0)
-            * fator_conversao_eur
-            * shares
-            * fator_retencao
+        fator_conversao_eur = (
+            (1.0 / taxa_eur_usd) if native_currency == "USD" else 1.0
         )
 
-    dados_processados.append(
-        {
-            "Ticker": t,
-            "Moeda": native_currency,
-            "Shares": shares,
-            "Preço Original": f"{curr_price_native:,.2f} {'$' if native_currency=='USD' else '€'}",
-            "Preço (€)": price_eur,
-            "Custo Médio (€)": cost_eur,
-            "Investido (€)": invested_eur,
-            "Valor Mercado (€)": mkt_value_eur,
-            "Variação Dia %": day_pct,
-            "Ganho Dia (€)": day_gl_eur,
-            "Retorno Total (€)": unrealized_gl_eur,
-            "Retorno Total %": total_return_pct,
-            "Dividendo Anual (€)": annual_dividend_eur,
-            "Dividend Yield %": div_yield * (fator_retencao),
-            "Yield on Cost %": yoc,
-        }
+        price_eur = curr_price_native * fator_conversao_eur
+        prev_close_eur = prev_close_native * fator_conversao_eur
+        cost_eur = (
+            (cost_input / taxa_eur_usd)
+            if currency_input == "USD"
+            else cost_input
+        )
+
+        invested_eur = shares * cost_eur
+        mkt_value_eur = shares * price_eur
+        unrealized_gl_eur = mkt_value_eur - invested_eur
+        total_return_pct = (
+            (unrealized_gl_eur / invested_eur) * 100
+            if invested_eur > 0
+            else 0.0
+        )
+        day_gl_eur = (
+            shares * (price_eur - prev_close_eur) if price_eur > 0 else 0.0
+        )
+
+        fator_retencao = (
+            0.85 if (native_currency == "USD" and not is_bruto) else 1.0
+        )
+        annual_dividend_eur = (
+            shares * (annual_div_native * fator_conversao_eur) * fator_retencao
+        )
+        yoc = (
+            (annual_dividend_eur / invested_eur) * 100
+            if invested_eur > 0
+            else 0.0
+        )
+
+        for m in range(1, 13):
+            distribuicao_mensal_eur[m] += (
+                monthly_sched_native.get(m, 0.0)
+                * fator_conversao_eur
+                * shares
+                * fator_retencao
+            )
+
+        dados_processados.append(
+            {
+                "Ticker": t,
+                "Moeda": native_currency,
+                "Shares": shares,
+                "Preço Original": f"{curr_price_native:,.2f} {'$' if native_currency=='USD' else '€'}",
+                "Preço (€)": price_eur,
+                "Custo Médio (€)": cost_eur,
+                "Investido (€)": invested_eur,
+                "Valor Mercado (€)": mkt_value_eur,
+                "Variação Dia %": day_pct,
+                "Ganho Dia (€)": day_gl_eur,
+                "Retorno Total (€)": unrealized_gl_eur,
+                "Retorno Total %": total_return_pct,
+                "Dividendo Anual (€)": annual_dividend_eur,
+                "Dividend Yield %": div_yield * fator_retencao,
+                "Yield on Cost %": yoc,
+            }
+        )
+
+    df_view = pd.DataFrame(dados_processados)
+
+    total_invested = (
+        df_view["Investido (€)"].sum() if not df_view.empty else 0.0
+    )
+    total_mkt_value = (
+        df_view["Valor Mercado (€)"].sum() if not df_view.empty else 0.0
+    )
+    total_unrealized_gl = total_mkt_value - total_invested
+    total_return_overall_pct = (
+        (total_unrealized_gl / total_invested) * 100
+        if total_invested > 0
+        else 0.0
+    )
+    total_day_gl = (
+        df_view["Ganho Dia (€)"].sum() if not df_view.empty else 0.0
+    )
+    total_annual_dividend = (
+        df_view["Dividendo Anual (€)"].sum() if not df_view.empty else 0.0
+    )
+    portfolio_yield = (
+        (total_annual_dividend / total_mkt_value) * 100
+        if total_mkt_value > 0
+        else 0.0
+    )
+    portfolio_yoc = (
+        (total_annual_dividend / total_invested) * 100
+        if total_invested > 0
+        else 0.0
     )
 
-df_view = pd.DataFrame(dados_processados)
+    if total_mkt_value > 0:
+        df_view["Peso %"] = (
+            df_view["Valor Mercado (€)"] / total_mkt_value
+        ) * 100
+    else:
+        df_view["Peso %"] = 0.0
 
-total_invested = (
-    df_view["Investido (€)"].sum() if not df_view.empty else 0.0
-)
-total_mkt_value = (
-    df_view["Valor Mercado (€)"].sum() if not df_view.empty else 0.0
-)
-total_unrealized_gl = total_mkt_value - total_invested
-total_return_overall_pct = (
-    (total_unrealized_gl / total_invested) * 100 if total_invested > 0 else 0.0
-)
-total_day_gl = (
-    df_view["Ganho Dia (€)"].sum() if not df_view.empty else 0.0
-)
-total_annual_dividend = (
-    df_view["Dividendo Anual (€)"].sum() if not df_view.empty else 0.0
-)
-portfolio_yield = (
-    (total_annual_dividend / total_mkt_value) * 100
-    if total_mkt_value > 0
-    else 0.0
-)
-portfolio_yoc = (
-    (total_annual_dividend / total_invested) * 100
-    if total_invested > 0
-    else 0.0
-)
+    # Layout do Cabeçalho
+    c_title, c_status = st.columns([4, 1])
+    with c_title:
+        st.title("💼 Dividend Portfolio Tracker (Consolidado em €)")
+    with c_status:
+        if auto_refresh:
+            st.markdown(
+                f"<div style='text-align: right; padding-top: 15px;'><span style='color: #00e676; font-size: 13px; font-weight: 600;'>🟢 AO VIVO ({intervalo_segundos}s)</span></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='text-align: right; padding-top: 15px;'><span style='color: #8b949e; font-size: 13px; font-weight: 600;'>⚪ PAUSADO</span></div>",
+                unsafe_allow_html=True,
+            )
 
-if total_mkt_value > 0:
-    df_view["Peso %"] = (df_view["Valor Mercado (€)"] / total_mkt_value) * 100
-else:
-    df_view["Peso %"] = 0.0
+    rotulo_div = (
+        "Dividendos Anuais (Brutos)"
+        if is_bruto
+        else "Dividendos Anuais (Líquidos)"
+    )
+    rotulo_yield = "Yield Bruto / YoC" if is_bruto else "Yield Líquido / YoC"
 
-# ---------------------------------------------------------
-# Layout Principal
-# ---------------------------------------------------------
-st.title("💼 Dividend Portfolio Tracker (Consolidado em €)")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric(
+        label="Valor de Mercado",
+        value=f"{total_mkt_value:,.2f} {MOEDA_BASE}",
+        delta=f"{total_day_gl:+,.2f} {MOEDA_BASE} hoje",
+    )
+    m2.metric(
+        label="Total Investido",
+        value=f"{total_invested:,.2f} {MOEDA_BASE}",
+    )
+    m3.metric(
+        label="Retorno Total (G/L)",
+        value=f"{total_unrealized_gl:+,.2f} {MOEDA_BASE}",
+        delta=f"{total_return_overall_pct:+.2f}%",
+    )
+    m4.metric(
+        label=rotulo_div,
+        value=f"{total_annual_dividend:,.2f} {MOEDA_BASE}",
+        delta=f"{total_annual_dividend/12:,.2f} {MOEDA_BASE}/mês",
+    )
+    m5.metric(
+        label=rotulo_yield,
+        value=f"{portfolio_yield:.2f}%",
+        delta=f"{portfolio_yoc:.2f}% YoC",
+    )
 
-rotulo_div = "Dividendos Anuais (Brutos)" if is_bruto else "Dividendos Anuais (Líquidos)"
-rotulo_yield = "Yield Bruto / YoC" if is_bruto else "Yield Líquido / YoC"
+    st.markdown("<br>", unsafe_allow_html=True)
 
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric(
-    label="Valor de Mercado",
-    value=f"{total_mkt_value:,.2f} {MOEDA_BASE}",
-    delta=f"{total_day_gl:+,.2f} {MOEDA_BASE} hoje",
-)
-m2.metric(
-    label="Total Investido",
-    value=f"{total_invested:,.2f} {MOEDA_BASE}",
-)
-m3.metric(
-    label="Retorno Total (G/L)",
-    value=f"{total_unrealized_gl:+,.2f} {MOEDA_BASE}",
-    delta=f"{total_return_overall_pct:+.2f}%",
-)
-m4.metric(
-    label=rotulo_div,
-    value=f"{total_annual_dividend:,.2f} {MOEDA_BASE}",
-    delta=f"{total_annual_dividend/12:,.2f} {MOEDA_BASE}/mês",
-)
-m5.metric(
-    label=rotulo_yield,
-    value=f"{portfolio_yield:.2f}%",
-    delta=f"{portfolio_yoc:.2f}% YoC",
-)
+    tab_holdings, tab_desempenho, tab_insights, tab_forecast, tab_irs = st.tabs(
+        [
+            "📊 Holdings",
+            "📈 Desempenho",
+            "💰 Dividend Insights",
+            "🚀 Snowball Forecast",
+            "📑 Fiscal (IRS)",
+        ]
+    )
 
-st.markdown("<br>", unsafe_allow_html=True)
+    # TAB 1: Holdings
+    with tab_holdings:
+        st.subheader("Posições da Carteira")
+        col_tabela, col_pizza = st.columns([3, 1])
 
-tab_holdings, tab_desempenho, tab_insights, tab_forecast, tab_irs = st.tabs(
-    [
-        "📊 Holdings",
-        "📈 Desempenho",
-        "💰 Dividend Insights",
-        "🚀 Snowball Forecast",
-        "📑 Fiscal (IRS)",
-    ]
-)
-
-# TAB 1: Holdings
-with tab_holdings:
-    st.subheader("Posições da Carteira")
-    col_tabela, col_pizza = st.columns([3, 1])
-
-    with col_tabela:
-        if not df_view.empty:
-            df_display = df_view[
-                [
-                    "Ticker",
-                    "Moeda",
-                    "Shares",
-                    "Preço Original",
-                    "Custo Médio (€)",
-                    "Valor Mercado (€)",
-                    "Peso %",
-                    "Variação Dia %",
-                    "Ganho Dia (€)",
-                    "Retorno Total (€)",
-                    "Retorno Total %",
-                    "Yield on Cost %",
-                ]
-            ].copy()
-
-            st.dataframe(
-                df_display.style.format(
-                    {
-                        "Shares": "{:,.2f}",
-                        "Custo Médio (€)": "{:,.2f} €",
-                        "Valor Mercado (€)": "{:,.2f} €",
-                        "Peso %": "{:.2f}%",
-                        "Variação Dia %": "{:+.2f}%",
-                        "Ganho Dia (€)": "{:+,.2f} €",
-                        "Retorno Total (€)": "{:+,.2f} €",
-                        "Retorno Total %": "{:+.2f}%",
-                        "Yield on Cost %": "{:.2f}%",
-                    }
-                ).map(
-                    lambda v: (
-                        "color: #00e676;"
-                        if v > 0
-                        else "color: #ff5252;"
-                        if v < 0
-                        else ""
-                    ),
-                    subset=[
+        with col_tabela:
+            if not df_view.empty:
+                df_display = df_view[
+                    [
+                        "Ticker",
+                        "Moeda",
+                        "Shares",
+                        "Preço Original",
+                        "Custo Médio (€)",
+                        "Valor Mercado (€)",
+                        "Peso %",
                         "Variação Dia %",
                         "Ganho Dia (€)",
                         "Retorno Total (€)",
                         "Retorno Total %",
-                    ],
-                ),
-                use_container_width=True,
-                height=350,
-            )
-        else:
-            st.info("A carteira está vazia.")
+                        "Yield on Cost %",
+                    ]
+                ].copy()
 
-    with col_pizza:
-        if not df_view.empty and total_mkt_value > 0:
-            fig_pie = px.pie(
-                df_view,
-                values="Valor Mercado (€)",
-                names="Ticker",
-                hole=0.5,
-                title="Distribuição (%)",
-                color_discrete_sequence=px.colors.qualitative.Dark24,
-            )
-            fig_pie.update_layout(
-                margin=dict(t=30, b=10, l=10, r=10),
-                showlegend=False,
-                height=320,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c9d1d9"),
-            )
-            fig_pie.update_traces(
-                textposition="inside", textinfo="percent+label"
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-# TAB 2: Desempenho (Estilo getquin / Parqet)
-with tab_desempenho:
-    col_centro, col_vazia = st.columns([1.18, 1.82])
-
-    with col_centro:
-        ganho_preco_eur = total_unrealized_gl
-        ganho_preco_pct = total_return_overall_pct
-
-        # Define valor de dividendos conforme seleção
-        if not df_divs_salvos.empty:
-            divs_valor_card = (
-                float(df_divs_salvos["Valor_Bruto"].sum())
-                if is_bruto
-                else float(df_divs_salvos["Valor_Liquido"].sum())
-            )
-        else:
-            divs_valor_card = (
-                601.38
-                if is_bruto
-                else float(stats_hist.get("divs_recebidos", 524.68))
-            )
-
-        with st.expander(
-            "⚙️ Configurar Histórico Realizado e Custos", expanded=False
-        ):
-            c_divs_rec = st.number_input(
-                "Dividendos Recebidos (€)",
-                min_value=0.0,
-                value=float(divs_valor_card),
-                step=10.0,
-            )
-            c_ganho_realizado = st.number_input(
-                "Ganhos Realizados (€)",
-                min_value=0.0,
-                value=float(stats_hist.get("ganho_realizado", 1602.89)),
-                step=50.0,
-            )
-            c_custos_transacao = st.number_input(
-                "Custos de Transação (€)",
-                min_value=0.0,
-                value=float(stats_hist.get("custos_transacao", 25.39)),
-                step=1.0,
-            )
-            c_trocas = st.number_input(
-                "Custos de Câmbio (€)",
-                min_value=0.0,
-                value=float(stats_hist.get("trocas", 0.0)),
-                step=1.0,
-            )
-            c_custos_correntes = st.number_input(
-                "Custos Correntes (€)",
-                min_value=0.0,
-                value=float(stats_hist.get("custos_correntes", 53.95)),
-                step=5.0,
-            )
-
-            if st.button("Guardar Parâmetros", use_container_width=True):
-                stats_hist.update(
-                    {
-                        "divs_recebidos": c_divs_rec,
-                        "ganho_realizado": c_ganho_realizado,
-                        "custos_transacao": c_custos_transacao,
-                        "trocas": c_trocas,
-                        "custos_correntes": c_custos_correntes,
-                    }
+                st.dataframe(
+                    df_display.style.format(
+                        {
+                            "Shares": "{:,.2f}",
+                            "Custo Médio (€)": "{:,.2f} €",
+                            "Valor Mercado (€)": "{:,.2f} €",
+                            "Peso %": "{:.2f}%",
+                            "Variação Dia %": "{:+.2f}%",
+                            "Ganho Dia (€)": "{:+,.2f} €",
+                            "Retorno Total (€)": "{:+,.2f} €",
+                            "Retorno Total %": "{:+.2f}%",
+                            "Yield on Cost %": "{:.2f}%",
+                        }
+                    ).map(
+                        lambda v: (
+                            "color: #00e676;"
+                            if v > 0
+                            else "color: #ff5252;"
+                            if v < 0
+                            else ""
+                        ),
+                        subset=[
+                            "Variação Dia %",
+                            "Ganho Dia (€)",
+                            "Retorno Total (€)",
+                            "Retorno Total %",
+                        ],
+                    ),
+                    use_container_width=True,
+                    height=350,
                 )
-                guardar_stats_historico(stats_hist)
-                st.success("Guardado com sucesso!")
-                st.rerun()
+            else:
+                st.info("A carteira está vazia.")
 
-        divs_pct = (
-            (c_divs_rec / total_invested) * 100 if total_invested > 0 else 0.0
-        )
-        ganho_real_pct = (
-            (c_ganho_realizado / total_invested) * 100
-            if total_invested > 0
-            else 0.0
-        )
-        total_custos = c_custos_transacao + c_trocas + c_custos_correntes
+        with col_pizza:
+            if not df_view.empty and total_mkt_value > 0:
+                fig_pie = px.pie(
+                    df_view,
+                    values="Valor Mercado (€)",
+                    names="Ticker",
+                    hole=0.5,
+                    title="Distribuição (%)",
+                    color_discrete_sequence=px.colors.qualitative.Dark24,
+                )
+                fig_pie.update_layout(
+                    margin=dict(t=30, b=10, l=10, r=10),
+                    showlegend=False,
+                    height=320,
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#c9d1d9"),
+                )
+                fig_pie.update_traces(
+                    textposition="inside", textinfo="percent+label"
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
 
-        retorno_total_eur = (
-            ganho_preco_eur + c_divs_rec + c_ganho_realizado - total_custos
-        )
-        retorno_total_pct = (
-            (retorno_total_eur / total_invested) * 100
-            if total_invested > 0
-            else 0.0
-        )
+    # TAB 2: Desempenho
+    with tab_desempenho:
+        col_centro, col_vazia = st.columns([1.18, 1.82])
 
-        tir_irr = float(stats_hist.get("tir", 14.92))
-        twr = float(stats_hist.get("twr", 16.47))
+        with col_centro:
+            ganho_preco_eur = total_unrealized_gl
+            ganho_preco_pct = total_return_overall_pct
 
-        card_html = f"""<div style="background-color: #11141a; border: 1px solid #21262d; border-radius: 12px; padding: 22px; color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 440px;">
+            if not df_divs.empty:
+                divs_valor_card = (
+                    float(df_divs["Valor_Bruto"].sum())
+                    if is_bruto
+                    else float(df_divs["Valor_Liquido"].sum())
+                )
+            else:
+                divs_valor_card = (
+                    601.38
+                    if is_bruto
+                    else float(stats.get("divs_recebidos", 524.68))
+                )
+
+            with st.expander(
+                "⚙️ Configurar Histórico Realizado e Custos", expanded=False
+            ):
+                c_divs_rec = st.number_input(
+                    "Dividendos Recebidos (€)",
+                    min_value=0.0,
+                    value=float(divs_valor_card),
+                    step=10.0,
+                )
+                c_ganho_realizado = st.number_input(
+                    "Ganhos Realizados (€)",
+                    min_value=0.0,
+                    value=float(stats.get("ganho_realizado", 1602.89)),
+                    step=50.0,
+                )
+                c_custos_transacao = st.number_input(
+                    "Custos de Transação (€)",
+                    min_value=0.0,
+                    value=float(stats.get("custos_transacao", 25.39)),
+                    step=1.0,
+                )
+                c_trocas = st.number_input(
+                    "Custos de Câmbio (€)",
+                    min_value=0.0,
+                    value=float(stats.get("trocas", 0.0)),
+                    step=1.0,
+                )
+                c_custos_correntes = st.number_input(
+                    "Custos Correntes (€)",
+                    min_value=0.0,
+                    value=float(stats.get("custos_correntes", 53.95)),
+                    step=5.0,
+                )
+
+                if st.button("Guardar Parâmetros", use_container_width=True):
+                    stats.update(
+                        {
+                            "divs_recebidos": c_divs_rec,
+                            "ganho_realizado": c_ganho_realizado,
+                            "custos_transacao": c_custos_transacao,
+                            "trocas": c_trocas,
+                            "custos_correntes": c_custos_correntes,
+                        }
+                    )
+                    guardar_stats_historico(stats)
+                    st.success("Guardado com sucesso!")
+                    st.rerun()
+
+            divs_pct = (
+                (c_divs_rec / total_invested) * 100
+                if total_invested > 0
+                else 0.0
+            )
+            ganho_real_pct = (
+                (c_ganho_realizado / total_invested) * 100
+                if total_invested > 0
+                else 0.0
+            )
+            total_custos = c_custos_transacao + c_trocas + c_custos_correntes
+
+            retorno_total_eur = (
+                ganho_preco_eur + c_divs_rec + c_ganho_realizado - total_custos
+            )
+            retorno_total_pct = (
+                (retorno_total_eur / total_invested) * 100
+                if total_invested > 0
+                else 0.0
+            )
+
+            tir_irr = float(stats.get("tir", 14.92))
+            twr = float(stats.get("twr", 16.47))
+
+            card_html = f"""<div style="background-color: #11141a; border: 1px solid #21262d; border-radius: 12px; padding: 22px; color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 440px;">
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
 <div>
 <span style="font-size: 19px; font-weight: 700;">Desempenho</span>
@@ -1417,310 +1473,123 @@ with tab_desempenho:
 <span style="color: #00d084; font-weight: 700;">↗ {twr:.2f}%</span>
 </div>
 </div>"""
-
-        clean_render = "".join(line.strip() for line in card_html.splitlines())
-        st.markdown(clean_render, unsafe_allow_html=True)
-
-# TAB 3: Dividend Insights
-with tab_insights:
-    st.subheader(f"Análise dos Proventos Passivos ({modo_retencao})")
-
-    c1, c2 = st.columns([2, 1])
-
-    with c1:
-        if not df_view.empty and total_annual_dividend > 0:
-            fig_bar = px.bar(
-                df_view.sort_values(
-                    by="Dividendo Anual (€)", ascending=False
-                ),
-                x="Ticker",
-                y="Dividendo Anual (€)",
-                text_auto=".2f",
-                title=f"Projeção Anual por Ativo ({modo_retencao})",
-                color="Dividendo Anual (€)",
-                color_continuous_scale="Greens",
+            st.markdown(
+                "".join(line.strip() for line in card_html.splitlines()),
+                unsafe_allow_html=True,
             )
-            fig_bar.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c9d1d9"),
-                height=340,
+
+    # TAB 3: Dividend Insights
+    with tab_insights:
+        st.subheader(f"Análise dos Proventos Passivos ({modo_retencao})")
+
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            if not df_view.empty and total_annual_dividend > 0:
+                fig_bar = px.bar(
+                    df_view.sort_values(
+                        by="Dividendo Anual (€)", ascending=False
+                    ),
+                    x="Ticker",
+                    y="Dividendo Anual (€)",
+                    text_auto=".2f",
+                    title=f"Projeção Anual por Ativo ({modo_retencao})",
+                    color="Dividendo Anual (€)",
+                    color_continuous_scale="Greens",
+                )
+                fig_bar.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#c9d1d9"),
+                    height=340,
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+            else:
+                st.info("Sem dados de dividendos para exibir.")
+
+        with c2:
+            st.markdown("#### Resumo de Distribuição")
+            st.write(
+                f"• **Rendimento Médio Mensal:** `{total_annual_dividend / 12:,.2f} {MOEDA_BASE}`"
             )
-            st.plotly_chart(fig_bar, use_container_width=True)
-        else:
-            st.info("Sem dados de dividendos para exibir.")
-
-    with c2:
-        st.markdown("#### Resumo de Distribuição")
-        st.write(
-            f"• **Rendimento Médio Mensal:** `{total_annual_dividend / 12:,.2f} {MOEDA_BASE}`"
-        )
-        st.write(
-            f"• **Rendimento Médio Diário:** `{total_annual_dividend / 365:,.2f} {MOEDA_BASE}`"
-        )
-        maior_pagador = (
-            df_view.loc[df_view["Dividendo Anual (€)"].idxmax()]["Ticker"]
-            if not df_view.empty and total_annual_dividend > 0
-            else "N/A"
-        )
-        st.write(f"• **Maior Pagador:** `{maior_pagador}`")
-        st.write(f"• **Dividend Yield:** `{portfolio_yield:.2f}%`")
-        st.write(f"• **Yield on Cost (YoC):** `{portfolio_yoc:.2f}%`")
-
-    st.markdown("---")
-    st.subheader("Calendário de Pagamentos Previsto (€)")
-    meses = [
-        "Jan",
-        "Fev",
-        "Mar",
-        "Abr",
-        "Mai",
-        "Jun",
-        "Jul",
-        "Ago",
-        "Set",
-        "Out",
-        "Nov",
-        "Dez",
-    ]
-    valores_mes = [distribuicao_mensal_eur[m] for m in range(1, 13)]
-
-    fig_months = go.Figure(
-        data=[
-            go.Bar(
-                x=meses,
-                y=valores_mes,
-                text=[
-                    f"{v:,.2f} {MOEDA_BASE}" if v > 0 else ""
-                    for v in valores_mes
-                ],
-                textposition="auto",
-                marker_color="#238636",
+            st.write(
+                f"• **Rendimento Médio Diário:** `{total_annual_dividend / 365:,.2f} {MOEDA_BASE}`"
             )
-        ]
-    )
-    fig_months.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c9d1d9"),
-        height=280,
-        margin=dict(t=20, b=20, l=10, r=10),
-        yaxis_title=f"Rendimento ({MOEDA_BASE})",
-    )
-    st.plotly_chart(fig_months, use_container_width=True)
+            maior_pagador = (
+                df_view.loc[df_view["Dividendo Anual (€)"].idxmax()]["Ticker"]
+                if not df_view.empty and total_annual_dividend > 0
+                else "N/A"
+            )
+            st.write(f"• **Maior Pagador:** `{maior_pagador}`")
+            st.write(f"• **Dividend Yield:** `{portfolio_yield:.2f}%`")
+            st.write(f"• **Yield on Cost (YoC):** `{portfolio_yoc:.2f}%`")
 
-    # Histórico detalhado de dividendos das corretoras
-    if not df_divs_salvos.empty:
         st.markdown("---")
-        st.subheader("📋 Histórico Real de Dividendos Recebidos (XTB + Trading 212)")
+        st.subheader("Calendário de Pagamentos Previsto (€)")
+        meses = [
+            "Jan",
+            "Fev",
+            "Mar",
+            "Abr",
+            "Mai",
+            "Jun",
+            "Jul",
+            "Ago",
+            "Set",
+            "Out",
+            "Nov",
+            "Dez",
+        ]
+        valores_mes = [distribuicao_mensal_eur[m] for m in range(1, 13)]
 
-        col_bruto_tot = df_divs_salvos["Valor_Bruto"].sum()
-        col_wht_tot = df_divs_salvos["Retencao_Fonte"].sum()
-        col_liq_tot = df_divs_salvos["Valor_Liquido"].sum()
-
-        m_d1, m_d2, m_d3 = st.columns(3)
-        m_d1.metric("Total Bruto", f"{col_bruto_tot:,.2f} €")
-        m_d2.metric(
-            "Retenção na Fonte Total",
-            f"-{col_wht_tot:,.2f} €",
-            delta=f"{(col_wht_tot/col_bruto_tot)*100:.1f}% retido na fonte"
-            if col_bruto_tot > 0
-            else "",
+        fig_months = go.Figure(
+            data=[
+                go.Bar(
+                    x=meses,
+                    y=valores_mes,
+                    text=[
+                        f"{v:,.2f} {MOEDA_BASE}" if v > 0 else ""
+                        for v in valores_mes
+                    ],
+                    textposition="auto",
+                    marker_color="#238636",
+                )
+            ]
         )
-        m_d3.metric("Total Líquido Recebido", f"{col_liq_tot:,.2f} €")
-
-        df_divs_display = df_divs_salvos.sort_values(
-            by="Data", ascending=False
-        ).copy()
-        st.dataframe(
-            df_divs_display.style.format(
-                {
-                    "Valor_Bruto": "{:,.2f} €",
-                    "Retencao_Fonte": "{:,.2f} €",
-                    "Valor_Liquido": "{:,.2f} €",
-                }
-            ),
-            use_container_width=True,
-            height=320,
-        )
-
-# TAB 4: Snowball Simulator
-with tab_forecast:
-    st.subheader("Simulador Snowball & Compounding (DRIP em €)")
-    col_inputs, col_graph = st.columns([1, 2])
-
-    with col_inputs:
-        anos = st.slider("Horizonte Temporal (Anos)", 5, 30, 20, 1)
-        aporte_mensal = st.number_input(
-            f"Aporte Mensal Adicional ({MOEDA_BASE})",
-            min_value=0,
-            value=1000,
-            step=100,
-        )
-        div_growth_rate = (
-            st.slider(
-                "Crescimento Anual do Dividendo (%)", 0.0, 15.0, 7.0, 0.5
-            )
-            / 100.0
-        )
-        stock_appreciation = (
-            st.slider(
-                "Valorização de Capital Anual (%)", 0.0, 15.0, 8.0, 0.5
-            )
-            / 100.0
-        )
-        reinvestir_div = st.checkbox(
-            "Reinvestir Dividendos (DRIP Automático)", value=True
-        )
-
-    anos_lista = list(range(0, anos + 1))
-    proj_valor = []
-    proj_dividendos = []
-
-    curr_val = total_mkt_value if total_mkt_value > 0 else 10000.0
-    curr_div = (
-        total_annual_dividend
-        if total_annual_dividend > 0
-        else (curr_val * 0.035)
-    )
-
-    for ano in anos_lista:
-        proj_valor.append(curr_val)
-        proj_dividendos.append(curr_div)
-
-        novos_aportes = aporte_mensal * 12
-        ganho_capital = curr_val * stock_appreciation
-        drip = curr_div if reinvestir_div else 0.0
-
-        curr_val = curr_val + ganho_capital + novos_aportes + drip
-        yield_base = portfolio_yield / 100.0 if portfolio_yield > 0 else 0.035
-        curr_div = (curr_div * (1 + div_growth_rate)) + (
-            (novos_aportes + drip) * yield_base
-        )
-
-    with col_graph:
-        fig_sim = go.Figure()
-        fig_sim.add_trace(
-            go.Scatter(
-                x=anos_lista,
-                y=proj_valor,
-                name=f"Valor do Portfólio ({MOEDA_BASE})",
-                line=dict(color="#58a6ff", width=3),
-                fill="tozeroy",
-            )
-        )
-        fig_sim.add_trace(
-            go.Scatter(
-                x=anos_lista,
-                y=proj_dividendos,
-                name=f"Dividendo Anual ({MOEDA_BASE})",
-                line=dict(color="#00e676", width=2),
-                yaxis="y2",
-            )
-        )
-
-        fig_sim.update_layout(
-            title="Efeito Bola de Neve (Património vs Rendimento Passivo)",
-            yaxis=dict(title=f"Valor Total ({MOEDA_BASE})"),
-            yaxis2=dict(
-                title=f"Dividendo Anual ({MOEDA_BASE})",
-                overlaying="y",
-                side="right",
-            ),
+        fig_months.update_layout(
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#c9d1d9"),
-            legend=dict(x=0.05, y=0.95),
-            height=380,
+            height=280,
+            margin=dict(t=20, b=20, l=10, r=10),
+            yaxis_title=f"Rendimento ({MOEDA_BASE})",
         )
-        st.plotly_chart(fig_sim, use_container_width=True)
+        st.plotly_chart(fig_months, use_container_width=True)
 
-# TAB 5: Fiscal (IRS Anexo J & Anexo G)
-with tab_irs:
-    st.subheader("📑 Apuramento Consolidado para IRS (XTB + Trading 212)")
-
-    aba_irs_maisvalias, aba_irs_dividendos = st.tabs(
-        [
-            "📈 Mais-Valias (Quadro 9.2A / Anexo G)",
-            "💰 Rendimentos de Capitais (Quadro 8 - Dividendos)",
-        ]
-    )
-
-    with aba_irs_maisvalias:
-        if not df_vendas_salvas.empty:
-            c_v1, c_v2, c_v3 = st.columns(3)
-            tot_alienado = df_vendas_salvas["Valor Venda (€)"].sum()
-            tot_aquisicao = df_vendas_salvas["Valor Compra (€)"].sum()
-            tot_saldo_mv = df_vendas_salvas["Mais/Menos-valia (€)"].sum()
-
-            c_v1.metric("Total Alienado (€)", f"{tot_alienado:,.2f} €")
-            c_v2.metric("Total de Aquisição (€)", f"{tot_aquisicao:,.2f} €")
-            c_v3.metric(
-                "Saldo de Mais-Valias Líquidas",
-                f"{tot_saldo_mv:+,.2f} €",
-                delta=f"{len(df_vendas_salvas)} operações registadas",
+        if not df_divs.empty:
+            st.markdown("---")
+            st.subheader(
+                "📋 Histórico Real de Dividendos Recebidos (XTB + Trading 212)"
             )
+            col_bruto_tot = df_divs["Valor_Bruto"].sum()
+            col_wht_tot = df_divs["Retencao_Fonte"].sum()
+            col_liq_tot = df_divs["Valor_Liquido"].sum()
 
-            corretora_filtro = st.selectbox(
-                "Filtrar por Corretora:",
-                ["Todas", "Trading 212", "XTB"],
-                key="filtro_corr",
+            m_d1, m_d2, m_d3 = st.columns(3)
+            m_d1.metric("Total Bruto", f"{col_bruto_tot:,.2f} €")
+            m_d2.metric(
+                "Retenção na Fonte Total",
+                f"-{col_wht_tot:,.2f} €",
+                delta=f"{(col_wht_tot/col_bruto_tot)*100:.1f}% retido"
+                if col_bruto_tot > 0
+                else "",
             )
-            df_mostrar_vendas = df_vendas_salvas.copy()
-            if corretora_filtro != "Todas":
-                df_mostrar_vendas = df_mostrar_vendas[
-                    df_mostrar_vendas["Corretora"] == corretora_filtro
-                ]
+            m_d3.metric("Total Líquido Recebido", f"{col_liq_tot:,.2f} €")
 
+            df_divs_display = df_divs.sort_values(
+                by="Data", ascending=False
+            ).copy()
             st.dataframe(
-                df_mostrar_vendas.sort_values(
-                    by="Data Venda", ascending=False
-                ).style.format(
-                    {
-                        "Valor Venda (€)": "{:,.2f} €",
-                        "Valor Compra (€)": "{:,.2f} €",
-                        "Mais/Menos-valia (€)": "{:+,.2f} €",
-                    }
-                ).map(
-                    lambda v: (
-                        "color: #00e676;"
-                        if v > 0
-                        else "color: #ff5252;"
-                        if v < 0
-                        else ""
-                    ),
-                    subset=["Mais/Menos-valia (€)"],
-                ),
-                use_container_width=True,
-                height=380,
-            )
-
-            csv_vendas = df_vendas_salvas.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "📥 Descarregar Tabela de Mais-Valias (CSV)",
-                data=csv_vendas,
-                file_name="mais_valias_irs_anexo_j_g.csv",
-                mime="text/csv",
-            )
-        else:
-            st.info(
-                "Importa os extratos da **XTB** e da **Trading 212** na barra lateral para gerar o relatório fiscal."
-            )
-
-    with aba_irs_dividendos:
-        if not df_divs_salvos.empty:
-            st.markdown("#### Discriminação de Dividendos no Estrangeiro (Anexo J - Quadro 8)")
-            # Agrupamento por País para preenchimento direto do Quadro 8
-            resumo_pais = (
-                df_divs_salvos.groupby("País")[
-                    ["Valor_Bruto", "Retencao_Fonte", "Valor_Liquido"]
-                ]
-                .sum()
-                .reset_index()
-            )
-
-            st.dataframe(
-                resumo_pais.style.format(
+                df_divs_display.style.format(
                     {
                         "Valor_Bruto": "{:,.2f} €",
                         "Retencao_Fonte": "{:,.2f} €",
@@ -1728,16 +1597,209 @@ with tab_irs:
                     }
                 ),
                 use_container_width=True,
+                height=320,
             )
 
-            csv_divs_irs = df_divs_salvos.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "📥 Descarregar Dividendos para IRS (CSV)",
-                data=csv_divs_irs,
-                file_name="dividendos_estrangeiro_anexo_j.csv",
-                mime="text/csv",
+    # TAB 4: Snowball Simulator
+    with tab_forecast:
+        st.subheader("Simulador Snowball & Compounding (DRIP em €)")
+        col_inputs, col_graph = st.columns([1, 2])
+
+        with col_inputs:
+            anos = st.slider("Horizonte Temporal (Anos)", 5, 30, 20, 1)
+            aporte_mensal = st.number_input(
+                f"Aporte Mensal Adicional ({MOEDA_BASE})",
+                min_value=0,
+                value=1000,
+                step=100,
             )
-        else:
-            st.info(
-                "Nenhum registo de dividendos disponível para o Quadro 8. Carrega os extratos na barra lateral."
+            div_growth_rate = (
+                st.slider(
+                    "Crescimento Anual do Dividendo (%)", 0.0, 15.0, 7.0, 0.5
+                )
+                / 100.0
             )
+            stock_appreciation = (
+                st.slider(
+                    "Valorização de Capital Anual (%)", 0.0, 15.0, 8.0, 0.5
+                )
+                / 100.0
+            )
+            reinvestir_div = st.checkbox(
+                "Reinvestir Dividendos (DRIP Automático)", value=True
+            )
+
+        anos_lista = list(range(0, anos + 1))
+        proj_valor = []
+        proj_dividendos = []
+
+        curr_val = total_mkt_value if total_mkt_value > 0 else 10000.0
+        curr_div = (
+            total_annual_dividend
+            if total_annual_dividend > 0
+            else (curr_val * 0.035)
+        )
+
+        for ano in anos_lista:
+            proj_valor.append(curr_val)
+            proj_dividendos.append(curr_div)
+
+            novos_aportes = aporte_mensal * 12
+            ganho_capital = curr_val * stock_appreciation
+            drip = curr_div if reinvestir_div else 0.0
+
+            curr_val = curr_val + ganho_capital + novos_aportes + drip
+            yield_base = (
+                portfolio_yield / 100.0 if portfolio_yield > 0 else 0.035
+            )
+            curr_div = (curr_div * (1 + div_growth_rate)) + (
+                (novos_aportes + drip) * yield_base
+            )
+
+        with col_graph:
+            fig_sim = go.Figure()
+            fig_sim.add_trace(
+                go.Scatter(
+                    x=anos_lista,
+                    y=proj_valor,
+                    name=f"Valor do Portfólio ({MOEDA_BASE})",
+                    line=dict(color="#58a6ff", width=3),
+                    fill="tozeroy",
+                )
+            )
+            fig_sim.add_trace(
+                go.Scatter(
+                    x=anos_lista,
+                    y=proj_dividendos,
+                    name=f"Dividendo Anual ({MOEDA_BASE})",
+                    line=dict(color="#00e676", width=2),
+                    yaxis="y2",
+                )
+            )
+
+            fig_sim.update_layout(
+                title="Efeito Bola de Neve (Património vs Rendimento Passivo)",
+                yaxis=dict(title=f"Valor Total ({MOEDA_BASE})"),
+                yaxis2=dict(
+                    title=f"Dividendo Anual ({MOEDA_BASE})",
+                    overlaying="y",
+                    side="right",
+                ),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#c9d1d9"),
+                legend=dict(x=0.05, y=0.95),
+                height=380,
+            )
+            st.plotly_chart(fig_sim, use_container_width=True)
+
+    # TAB 5: Fiscal (IRS Anexo J & Anexo G)
+    with tab_irs:
+        st.subheader("📑 Apuramento Consolidado para IRS (XTB + Trading 212)")
+        aba_irs_mv, aba_irs_divs = st.tabs(
+            [
+                "📈 Mais-Valias (Quadro 9.2A / Anexo G)",
+                "💰 Rendimentos de Capitais (Quadro 8 - Dividendos)",
+            ]
+        )
+
+        with aba_irs_mv:
+            if not df_vendas.empty:
+                c_v1, c_v2, c_v3 = st.columns(3)
+                tot_alienado = df_vendas["Valor Venda (€)"].sum()
+                tot_aquisicao = df_vendas["Valor Compra (€)"].sum()
+                tot_saldo_mv = df_vendas["Mais/Menos-valia (€)"].sum()
+
+                c_v1.metric("Total Alienado (€)", f"{tot_alienado:,.2f} €")
+                c_v2.metric(
+                    "Total de Aquisição (€)", f"{tot_aquisicao:,.2f} €"
+                )
+                c_v3.metric(
+                    "Saldo de Mais-Valias Líquidas",
+                    f"{tot_saldo_mv:+,.2f} €",
+                    delta=f"{len(df_vendas)} operações registadas",
+                )
+
+                corretora_filtro = st.selectbox(
+                    "Filtrar por Corretora:",
+                    ["Todas", "Trading 212", "XTB"],
+                    key="filtro_corr",
+                )
+                df_mostrar_vendas = df_vendas.copy()
+                if corretora_filtro != "Todas":
+                    df_mostrar_vendas = df_mostrar_vendas[
+                        df_mostrar_vendas["Corretora"] == corretora_filtro
+                    ]
+
+                st.dataframe(
+                    df_mostrar_vendas.sort_values(
+                        by="Data Venda", ascending=False
+                    ).style.format(
+                        {
+                            "Valor Venda (€)": "{:,.2f} €",
+                            "Valor Compra (€)": "{:,.2f} €",
+                            "Mais/Menos-valia (€)": "{:+,.2f} €",
+                        }
+                    ).map(
+                        lambda v: (
+                            "color: #00e676;"
+                            if v > 0
+                            else "color: #ff5252;"
+                            if v < 0
+                            else ""
+                        ),
+                        subset=["Mais/Menos-valia (€)"],
+                    ),
+                    use_container_width=True,
+                    height=380,
+                )
+
+                csv_vendas = df_vendas.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "📥 Descarregar Tabela de Mais-Valias (CSV)",
+                    data=csv_vendas,
+                    file_name="mais_valias_irs_anexo_j_g.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.info(
+                    "Importa os extratos na barra lateral para carregar as mais-valias."
+                )
+
+        with aba_irs_divs:
+            if not df_divs.empty:
+                st.markdown(
+                    "#### Discriminação de Dividendos no Estrangeiro (Anexo J - Quadro 8)"
+                )
+                resumo_pais = (
+                    df_divs.groupby("País")[
+                        ["Valor_Bruto", "Retencao_Fonte", "Valor_Liquido"]
+                    ]
+                    .sum()
+                    .reset_index()
+                )
+
+                st.dataframe(
+                    resumo_pais.style.format(
+                        {
+                            "Valor_Bruto": "{:,.2f} €",
+                            "Retencao_Fonte": "{:,.2f} €",
+                            "Valor_Liquido": "{:,.2f} €",
+                        }
+                    ),
+                    use_container_width=True,
+                )
+
+                csv_divs_irs = df_divs.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "📥 Descarregar Dividendos para IRS (CSV)",
+                    data=csv_divs_irs,
+                    file_name="dividendos_estrangeiro_anexo_j.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.info("Nenhum registo de dividendos disponível para o IRS.")
+
+
+# Execução do painel dinâmico
+render_painel_principal()
