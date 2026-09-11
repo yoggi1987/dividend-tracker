@@ -53,6 +53,21 @@ MAPA_PAISES_IRS = {
     "DK": "208 - Dinamarca",
 }
 
+MESES_NOMES = [
+    "jan",
+    "fev",
+    "mar",
+    "abr",
+    "mai",
+    "jun",
+    "jul",
+    "ago",
+    "set",
+    "out",
+    "nov",
+    "dez",
+]
+
 st.markdown(
     """
     <style>
@@ -69,7 +84,6 @@ st.markdown(
 )
 
 
-# Suporte resiliente a fragmentos nativos do Streamlit
 def fragment_auto(run_every=None):
     if hasattr(st, "fragment"):
         return st.fragment(run_every=run_every)
@@ -199,11 +213,15 @@ def carregar_stats_historico():
         "custos_correntes": 53.95,
         "tir": 14.92,
         "twr": 16.47,
+        "dgr_estimado": 7.0,
+        "aporte_mensal_estimado": 0.0,
     }
     if os.path.exists(HIST_FILE):
         try:
             df_h = pd.read_csv(HIST_FILE)
-            return df_h.iloc[0].to_dict()
+            d = df_h.iloc[0].to_dict()
+            default_stats.update(d)
+            return default_stats
         except Exception:
             return default_stats
     return default_stats
@@ -214,7 +232,7 @@ def guardar_stats_historico(stats_dict):
 
 
 # ---------------------------------------------------------
-# Câmbio EUR / USD em Tempo Real (Cache Ultrarrápida: 5s)
+# Câmbio EUR / USD em Tempo Real (TTL = 5s)
 # ---------------------------------------------------------
 @st.cache_data(ttl=5)
 def obter_taxa_eur_usd():
@@ -255,7 +273,7 @@ def processar_ficheiro_importado(ficheiro):
             "tipo_ficheiro": "",
         }
 
-        # CASO 1: RELATÓRIO EXCEL XTB (.XLSX)
+        # 1. XTB (.xlsx)
         if nome.endswith((".xlsx", ".xls")):
             dados_apuramento["tipo_ficheiro"] = "XTB"
             excel = pd.ExcelFile(ficheiro)
@@ -521,7 +539,7 @@ def processar_ficheiro_importado(ficheiro):
 
             return dados_apuramento, None
 
-        # CASO 2: EXTRATO CSV DA TRADING 212
+        # 2. Trading 212 (.csv)
         else:
             dados_apuramento["tipo_ficheiro"] = "Trading 212"
             df_raw = pd.read_csv(ficheiro, encoding="utf-8-sig")
@@ -673,7 +691,7 @@ def processar_ficheiro_importado(ficheiro):
 
 
 # ---------------------------------------------------------
-# Obtenção de Cotações em Tempo Real (Cache Ultrarrápida: 5s)
+# Obtenção de Cotações em Tempo Real (TTL = 5s)
 # ---------------------------------------------------------
 @st.cache_data(ttl=5)
 def obter_dados_mercado(tickers):
@@ -773,12 +791,11 @@ stats_hist = carregar_stats_historico()
 with st.sidebar:
     st.header("⚙️ Gestor de Carteira")
 
-    # MÓDULO AO VIVO ULTRARRÁPIDO
-    st.markdown("### ⚡ Cotações ao Vivo")
+    st.markdown("### ⚡ Cotações em Tempo Real")
     auto_refresh = st.toggle(
-        "Atualização em Tempo Real",
+        "Atualização Automática",
         value=True,
-        help="Atualiza as cotações e o valor da carteira automaticamente em segundo plano.",
+        help="Atualiza as cotações e métricas a cada 5 segundos em segundo plano.",
     )
     intervalo_segundos = 5
     if auto_refresh:
@@ -786,29 +803,27 @@ with st.sidebar:
             "Frequência:",
             options=[5, 10, 15, 30, 60],
             value=5,
-            format_func=lambda s: f"{s}s (Direto)" if s == 5 else (f"{s}s" if s < 60 else f"{s//60} min"),
+            format_func=lambda s: f"{s}s (Direto)" if s == 5 else f"{s}s",
         )
         st.caption(f"🟢 **Modo Direto:** Atualiza a cada **{intervalo_segundos} segundos**.")
     else:
-        st.caption("⚪ Pausado: atualização manual apenas.")
+        st.caption("⚪ Pausado: atualização manual.")
 
     run_interval = intervalo_segundos if auto_refresh else None
 
     st.markdown("---")
 
-    # SELETOR FISCAL DE DIVIDENDOS
     st.markdown("### 🏛️ Opção Fiscal de Dividendos")
     modo_retencao = st.radio(
         "Visualizar Dividendos:",
         ["Sem Retenção (Líquido)", "Com Retenção (Bruto)"],
         index=0,
-        help="Líquido: o valor real creditado na conta.\nBruto: o dividendo pago pela empresa antes do imposto retido na fonte.",
+        help="Líquido: o valor real creditado na conta.\nBruto: o total antes do imposto retido na fonte.",
     )
     is_bruto = "Bruto" in modo_retencao
 
     st.markdown("---")
 
-    # 1. IMPORTAR EXCEL (XTB) OU CSV (TRADING 212)
     with st.expander("📥 Importar Relatório (XTB / T212)", expanded=True):
         st.write("Carrega o **Excel da XTB** ou o **CSV da Trading 212**.")
         uploaded_file = st.file_uploader(
@@ -826,7 +841,6 @@ with st.sidebar:
                 if erro:
                     st.error(erro)
                 elif res_dados is not None:
-                    # 1. Holdings
                     df_novo = res_dados["holdings"]
                     if not df_novo.empty:
                         if tipo_import == "Substituir Carteira":
@@ -839,7 +853,6 @@ with st.sidebar:
                             )
                         guardar_portfolio(df_portfolio)
 
-                    # 2. Vendas para IRS (Merge Permanente)
                     if res_dados["closed_trades"]:
                         df_novas_vendas = pd.DataFrame(
                             res_dados["closed_trades"]
@@ -848,14 +861,12 @@ with st.sidebar:
                             df_novas_vendas
                         )
 
-                    # 3. Dividendos (Merge Permanente)
                     if res_dados["dividend_records"]:
                         df_novos_divs = pd.DataFrame(
                             res_dados["dividend_records"]
                         )
                         df_divs_salvos = guardar_dividendos(df_novos_divs)
 
-                    # 4. Atualização de totais
                     if not df_divs_salvos.empty:
                         stats_hist["divs_recebidos"] = float(
                             df_divs_salvos["Valor_Liquido"].sum()
@@ -871,12 +882,11 @@ with st.sidebar:
                     guardar_stats_historico(stats_hist)
 
                     st.success(
-                        f"Relatório {res_dados['tipo_ficheiro']} importado e consolidado com sucesso!"
+                        f"Relatório {res_dados['tipo_ficheiro']} processado com sucesso!"
                     )
                     st.cache_data.clear()
                     st.rerun()
 
-    # 2. ADICIONAR / REFORÇAR ATIVO MANUALMENTE
     with st.expander("➕ Adicionar / Reforçar Ativo", expanded=False):
         novo_ticker = (
             st.text_input("Ticker (ex: AAPL, O, VGWD.DE)")
@@ -954,7 +964,6 @@ with st.sidebar:
                 st.cache_data.clear()
                 st.rerun()
 
-    # 3. EDITAR / CORRIGIR ATIVO
     with st.expander("✏️ Editar / Corrigir Ativo", expanded=False):
         if not df_portfolio.empty:
             ticker_para_editar = st.selectbox(
@@ -1000,7 +1009,6 @@ with st.sidebar:
                 st.cache_data.clear()
                 st.rerun()
 
-    # 4. REMOVER ATIVO
     with st.expander("🗑️ Remover Ativo", expanded=False):
         if not df_portfolio.empty:
             ticker_remover = st.selectbox(
@@ -1028,7 +1036,7 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------
-# PAINEL PRINCIPAL AUTOMÁTICO EM SEGUNDO PLANO
+# PAINEL PRINCIPAL
 # ---------------------------------------------------------
 @fragment_auto(run_every=run_interval)
 def render_painel_principal():
@@ -1042,6 +1050,8 @@ def render_painel_principal():
     market_data = obter_dados_mercado(tickers_lista)
 
     dados_processados = []
+    # Dicionário detalhado: mês -> {ticker: valor_eur}
+    distribuicao_mensal_detalhada = {m: {} for m in range(1, 13)}
     distribuicao_mensal_eur = {m: 0.0 for m in range(1, 13)}
 
     for _, row in df_port.iterrows():
@@ -1098,12 +1108,15 @@ def render_painel_principal():
         )
 
         for m in range(1, 13):
-            distribuicao_mensal_eur[m] += (
+            val_m = (
                 monthly_sched_native.get(m, 0.0)
                 * fator_conversao_eur
                 * shares
                 * fator_retencao
             )
+            if val_m > 0:
+                distribuicao_mensal_detalhada[m][t] = val_m
+                distribuicao_mensal_eur[m] += val_m
 
         dados_processados.append(
             {
@@ -1163,7 +1176,6 @@ def render_painel_principal():
     else:
         df_view["Peso %"] = 0.0
 
-    # Layout do Cabeçalho
     c_title, c_status = st.columns([4, 1])
     with c_title:
         st.title("💼 Dividend Portfolio Tracker (Consolidado em €)")
@@ -1478,127 +1490,302 @@ def render_painel_principal():
                 unsafe_allow_html=True,
             )
 
-    # TAB 3: Dividend Insights
+    # TAB 3: Dividend Insights (Estilo getquin com Estimativa Futura)
     with tab_insights:
-        st.subheader(f"Análise dos Proventos Passivos ({modo_retencao})")
+        st.markdown(
+            """
+            <div style="display: flex; align-items: center; margin-bottom: 15px;">
+                <span style="font-size: 20px; font-weight: 700; margin-right: 10px;">Dividendos</span>
+                <span style="background-color: #21262d; color: #8b949e; font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 4px;">PREMIUM</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            if not df_view.empty and total_annual_dividend > 0:
-                fig_bar = px.bar(
-                    df_view.sort_values(
-                        by="Dividendo Anual (€)", ascending=False
-                    ),
-                    x="Ticker",
-                    y="Dividendo Anual (€)",
-                    text_auto=".2f",
-                    title=f"Projeção Anual por Ativo ({modo_retencao})",
-                    color="Dividendo Anual (€)",
-                    color_continuous_scale="Greens",
+        with st.expander("⚙️ Parâmetros da Estimativa Futura", expanded=False):
+            c_dgr_col, c_apt_col = st.columns(2)
+            with c_dgr_col:
+                taxa_dgr = st.slider(
+                    "Crescimento Anual dos Dividendos (% DGR)",
+                    0.0,
+                    15.0,
+                    float(stats.get("dgr_estimado", 7.0)),
+                    0.5,
                 )
-                fig_bar.update_layout(
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color="#c9d1d9"),
-                    height=340,
+            with c_apt_col:
+                aporte_futuro = st.number_input(
+                    "Aporte Mensal Estimado Adicional (€)",
+                    min_value=0.0,
+                    value=float(stats.get("aporte_mensal_estimado", 0.0)),
+                    step=100.0,
                 )
-                st.plotly_chart(fig_bar, use_container_width=True)
-            else:
-                st.info("Sem dados de dividendos para exibir.")
 
-        with c2:
-            st.markdown("#### Resumo de Distribuição")
-            st.write(
-                f"• **Rendimento Médio Mensal:** `{total_annual_dividend / 12:,.2f} {MOEDA_BASE}`"
-            )
-            st.write(
-                f"• **Rendimento Médio Diário:** `{total_annual_dividend / 365:,.2f} {MOEDA_BASE}`"
-            )
-            maior_pagador = (
-                df_view.loc[df_view["Dividendo Anual (€)"].idxmax()]["Ticker"]
-                if not df_view.empty and total_annual_dividend > 0
-                else "N/A"
-            )
-            st.write(f"• **Maior Pagador:** `{maior_pagador}`")
-            st.write(f"• **Dividend Yield:** `{portfolio_yield:.2f}%`")
-            st.write(f"• **Yield on Cost (YoC):** `{portfolio_yoc:.2f}%`")
+            if st.button("Guardar Parâmetros de Estimativa", use_container_width=True):
+                stats["dgr_estimado"] = taxa_dgr
+                stats["aporte_mensal_estimado"] = aporte_futuro
+                guardar_stats_historico(stats)
+                st.success("Configuração de estimativa guardada!")
+                st.rerun()
 
-        st.markdown("---")
-        st.subheader("Calendário de Pagamentos Previsto (€)")
-        meses = [
-            "Jan",
-            "Fev",
-            "Mar",
-            "Abr",
-            "Mai",
-            "Jun",
-            "Jul",
-            "Ago",
-            "Set",
-            "Out",
-            "Nov",
-            "Dez",
+        # Seletor de Horizonte de Dividendos
+        anos_disponiveis = [
+            "2025",
+            "2026 (Atual)",
+            "2027 (Estimativa)",
+            "2028 (Estimativa)",
+            "Previsão Multi-Anual",
         ]
-        valores_mes = [distribuicao_mensal_eur[m] for m in range(1, 13)]
+        ano_selecionado = st.radio(
+            "Selecionar Horizonte:",
+            anos_disponiveis,
+            index=1,
+            horizontal=True,
+            label_visibility="collapsed",
+        )
 
-        fig_months = go.Figure(
-            data=[
-                go.Bar(
-                    x=meses,
-                    y=valores_mes,
-                    text=[
-                        f"{v:,.2f} {MOEDA_BASE}" if v > 0 else ""
-                        for v in valores_mes
-                    ],
-                    textposition="auto",
-                    marker_color="#238636",
-                )
+        # Cálculo do Fator de Crescimento conforme o Ano
+        fator_ano = 1.0
+        incremento_aportes = 0.0
+        is_multi_ano = ano_selecionado == "Previsão Multi-Anual"
+
+        if "2025" in ano_selecionado:
+            fator_ano = 0.0  # Histórico sem dados prévios
+        elif "2026" in ano_selecionado:
+            fator_ano = 1.0
+        elif "2027" in ano_selecionado:
+            fator_ano = 1.0 + (taxa_dgr / 100.0)
+            incremento_aportes = (aporte_futuro * 12) * (portfolio_yield / 100.0)
+        elif "2028" in ano_selecionado:
+            fator_ano = (1.0 + (taxa_dgr / 100.0)) ** 2
+            incremento_aportes = (aporte_futuro * 24) * (portfolio_yield / 100.0)
+
+        # Mapeamento dos dividendos mensais para o ano selecionado
+        valores_mes_ano = []
+        pagadores_mes_ano = []
+        is_mes_estimado = []
+
+        mes_atual = pd.Timestamp.now().month  # 9 (Setembro)
+
+        for m in range(1, 13):
+            # Projeção base da carteira com o fator de crescimento do ano
+            val_base_m = (distribuicao_mensal_eur[m] * fator_ano) + (
+                incremento_aportes / 12.0
+            )
+            pagadores = list(distribuicao_mensal_detalhada[m].keys())
+
+            if "2026" in ano_selecionado:
+                # Em 2026: meses passados com registos reais usam os dados reais dos ficheiros
+                if not df_divs.empty and m < mes_atual:
+                    divs_m_real = df_divs[
+                        df_divs["Data"].str.startswith(f"2026-{m:02d}")
+                    ]
+                    if not divs_m_real.empty:
+                        val_real = (
+                            divs_m_real["Valor_Bruto"].sum()
+                            if is_bruto
+                            else divs_m_real["Valor_Liquido"].sum()
+                        )
+                        valores_mes_ano.append(val_real)
+                        pagadores_mes_ano.append(
+                            divs_m_real["Ticker"].unique().tolist()
+                        )
+                        is_mes_estimado.append(False)
+                        continue
+
+                # Meses futuros de 2026
+                valores_mes_ano.append(val_base_m)
+                pagadores_mes_ano.append(pagadores)
+                is_mes_estimado.append(m >= mes_atual)
+
+            elif "2025" in ano_selecionado:
+                valores_mes_ano.append(0.0)
+                pagadores_mes_ano.append([])
+                is_mes_estimado.append(False)
+            else:
+                # 2027 / 2028: todos os meses são 100% estimados
+                valores_mes_ano.append(val_base_m)
+                pagadores_mes_ano.append(pagadores)
+                is_mes_estimado.append(True)
+
+        total_ano_calculado = sum(valores_mes_ano)
+        media_mensal_ano = total_ano_calculado / 12.0
+
+        # 4 Cartões de Topo estilo getquin
+        k1, k2, k3, k4 = st.columns(4)
+        rotulo_topo = (
+            "Total previsto" if "Estimativa" in ano_selecionado else "Total recebido / previsto"
+        )
+        k1.metric(rotulo_topo, f"€ {total_ano_calculado:,.2f}")
+        k2.metric(
+            "Rendimento de dividendos (TTM)",
+            f"{portfolio_yield * fator_ano:.3f}%",
+        )
+        k3.metric("YoC (TTM)", f"{portfolio_yoc * fator_ano:.3f}%")
+        k4.metric("CAGR Estimado", f"{taxa_dgr:.1f}%")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        if not is_multi_ano:
+            # Gráfico Mensal idêntico ao getquin
+            fig_meses = go.Figure()
+
+            # Barras reais (sólidas)
+            x_real = [
+                MESES_NOMES[i]
+                for i in range(12)
+                if not is_mes_estimado[i] and valores_mes_ano[i] > 0
             ]
-        )
-        fig_months.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#c9d1d9"),
-            height=280,
-            margin=dict(t=20, b=20, l=10, r=10),
-            yaxis_title=f"Rendimento ({MOEDA_BASE})",
-        )
-        st.plotly_chart(fig_months, use_container_width=True)
+            y_real = [
+                valores_mes_ano[i]
+                for i in range(12)
+                if not is_mes_estimado[i] and valores_mes_ano[i] > 0
+            ]
 
-        if not df_divs.empty:
-            st.markdown("---")
-            st.subheader(
-                "📋 Histórico Real de Dividendos Recebidos (XTB + Trading 212)"
-            )
-            col_bruto_tot = df_divs["Valor_Bruto"].sum()
-            col_wht_tot = df_divs["Retencao_Fonte"].sum()
-            col_liq_tot = df_divs["Valor_Liquido"].sum()
+            if x_real:
+                fig_meses.add_trace(
+                    go.Bar(
+                        x=x_real,
+                        y=y_real,
+                        name="Recebido",
+                        marker=dict(color="#00d084"),
+                        text=[f"€ {v:,.2f}" for v in y_real],
+                        textposition="outside",
+                    )
+                )
 
-            m_d1, m_d2, m_d3 = st.columns(3)
-            m_d1.metric("Total Bruto", f"{col_bruto_tot:,.2f} €")
-            m_d2.metric(
-                "Retenção na Fonte Total",
-                f"-{col_wht_tot:,.2f} €",
-                delta=f"{(col_wht_tot/col_bruto_tot)*100:.1f}% retido"
-                if col_bruto_tot > 0
-                else "",
-            )
-            m_d3.metric("Total Líquido Recebido", f"{col_liq_tot:,.2f} €")
+            # Barras estimadas (hachuradas com listras diagonais)
+            x_est = [
+                MESES_NOMES[i]
+                for i in range(12)
+                if is_mes_estimado[i] and valores_mes_ano[i] > 0
+            ]
+            y_est = [
+                valores_mes_ano[i]
+                for i in range(12)
+                if is_mes_estimado[i] and valores_mes_ano[i] > 0
+            ]
 
-            df_divs_display = df_divs.sort_values(
-                by="Data", ascending=False
-            ).copy()
-            st.dataframe(
-                df_divs_display.style.format(
-                    {
-                        "Valor_Bruto": "{:,.2f} €",
-                        "Retencao_Fonte": "{:,.2f} €",
-                        "Valor_Liquido": "{:,.2f} €",
-                    }
+            if x_est:
+                fig_meses.add_trace(
+                    go.Bar(
+                        x=x_est,
+                        y=y_est,
+                        name="Estimado",
+                        marker=dict(
+                            color="#9b51e0",
+                            pattern=dict(shape="/", fgcolor="#ffffff", size=8),
+                        ),
+                        text=[f"€ {v:,.2f}" for v in y_est],
+                        textposition="outside",
+                    )
+                )
+
+            # Linha tracejada da média mensal Ø
+            if media_mensal_ano > 0:
+                fig_meses.add_hline(
+                    y=media_mensal_ano,
+                    line_dash="dash",
+                    line_color="#8b949e",
+                    line_width=1.5,
+                )
+
+            fig_meses.update_layout(
+                title=dict(
+                    text=f"<b>Ø € {media_mensal_ano:,.2f}</b> <span style='font-size:12px; color:#8b949e;'>(Média/mês)</span>"
+                    f"<span style='float:right;'><b>Σ € {total_ano_calculado:,.2f}</b> <span style='font-size:12px; color:#8b949e;'>(Total Anual)</span></span>",
+                    x=0.01,
+                    y=0.98,
+                    xanchor="left",
+                    font=dict(color="#ffffff", size=15),
                 ),
-                use_container_width=True,
-                height=320,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#c9d1d9"),
+                height=350,
+                margin=dict(t=50, b=20, l=10, r=10),
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1,
+                ),
+                yaxis=dict(
+                    showgrid=True,
+                    gridcolor="#21262d",
+                    zeroline=False,
+                    showticklabels=False,
+                ),
+                xaxis=dict(
+                    showgrid=False,
+                    tickfont=dict(color="#8b949e", size=13),
+                    categoryorder="array",
+                    categoryarray=MESES_NOMES,
+                ),
             )
+            st.plotly_chart(fig_meses, use_container_width=True)
+
+            # Grelha de Ativos Pagadores em baixo do gráfico
+            st.markdown("#### 📅 Ativos Pagadores em Cada Mês")
+            cols_meses = st.columns(12)
+            for idx, c in enumerate(cols_meses):
+                with c:
+                    m_nome = MESES_NOMES[idx]
+                    m_val = valores_mes_ano[idx]
+                    m_pags = pagadores_mes_ano[idx]
+                    st.markdown(
+                        f"<div style='text-align:center;'><b style='color:#8b949e;'>{m_nome}</b><br>"
+                        f"<span style='font-size:13px; font-weight:700;'>€ {m_val:,.2f}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    if m_pags:
+                        for p in m_pags[:3]:
+                            p_clean = p.split(".")[0]
+                            st.markdown(
+                                f"<div style='background-color:#21262d; border-radius:4px; font-size:10px; text-align:center; margin:2px 0; padding:1px;'>{p_clean}</div>",
+                                unsafe_allow_html=True,
+                            )
+                    else:
+                        st.markdown(
+                            "<div style='color:#484f58; font-size:11px; text-align:center;'>-</div>",
+                            unsafe_allow_html=True,
+                        )
+
+        else:
+            # Visão Multi-Anual: Evolução de 2025 até 2030
+            anos_proj = [2025, 2026, 2027, 2028, 2029, 2030]
+            valores_multi = []
+            for y in anos_proj:
+                if y == 2025:
+                    valores_multi.append(0.0)
+                elif y == 2026:
+                    valores_multi.append(total_annual_dividend)
+                else:
+                    exp = y - 2026
+                    cresc = (1.0 + (taxa_dgr / 100.0)) ** exp
+                    novos = (aporte_futuro * 12 * exp) * (portfolio_yield / 100.0)
+                    valores_multi.append((total_annual_dividend * cresc) + novos)
+
+            fig_multi = go.Figure()
+            fig_multi.add_trace(
+                go.Bar(
+                    x=[str(y) for y in anos_proj],
+                    y=valores_multi,
+                    text=[f"€ {v:,.2f}" for v in valores_multi],
+                    textposition="auto",
+                    marker_color=["#21262d", "#00d084", "#58a6ff", "#58a6ff", "#58a6ff", "#58a6ff"],
+                )
+            )
+            fig_multi.update_layout(
+                title="<b>Evolução Anual dos Dividendos Passivos (2025 - 2030)</b>",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#c9d1d9"),
+                height=350,
+                yaxis_title="Total Anual (€)",
+            )
+            st.plotly_chart(fig_multi, use_container_width=True)
 
     # TAB 4: Snowball Simulator
     with tab_forecast:
@@ -1801,5 +1988,5 @@ def render_painel_principal():
                 st.info("Nenhum registo de dividendos disponível para o IRS.")
 
 
-# Execução do painel dinâmico
+# Execução do painel dinâmico em streaming
 render_painel_principal()
