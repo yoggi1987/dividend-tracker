@@ -20,6 +20,7 @@ st.set_page_config(
 MOEDA_BASE = "€"
 CSV_FILE = "portfolio.csv"
 
+# Mapeamento para garantir correspondência no Yahoo Finance
 MAPA_TICKERS_EUROPA = {
     "FUSD": "FUSD.DE",
     "IDVY": "IDVY.AS",
@@ -117,134 +118,205 @@ def obter_taxa_eur_usd():
 
 
 # ---------------------------------------------------------
-# Motor de Leitura de Extratos (CSV & Excel / XTB / Trading 212)
+# Motor de Leitura de Extratos Inteligente (XTB & T212)
 # ---------------------------------------------------------
 def normalizar_ticker_xtb(ticker_raw):
     t = str(ticker_raw).strip().upper()
     if t.endswith(".US"):
-        return t[:-3]  # Remove .US (ex: VICI.US -> VICI)
+        return t[:-3]
     if t.endswith(".NL"):
-        return t.replace(".NL", ".AS")
+        t = t.replace(".NL", ".AS")
+    base = t.split(".")[0]
+    if base in MAPA_TICKERS_EUROPA:
+        return MAPA_TICKERS_EUROPA[base]
     return MAPA_TICKERS_EUROPA.get(t, t)
+
+
+def localizar_tabela_com_cabecalho(df_raw):
+    """Percorre as primeiras 35 linhas até achar o cabeçalho real"""
+    for idx in range(min(35, len(df_raw))):
+        linha_texto = " ".join(
+            [
+                str(v).upper()
+                for v in df_raw.iloc[idx].values
+                if pd.notnull(v) and str(v).strip() != ""
+            ]
+        )
+        tem_simbolo = any(
+            k in linha_texto
+            for k in ["SÍMBOLO", "SIMBOLO", "SYMBOL", "TICKER", "INSTRUMENT"]
+        )
+        tem_volume = any(
+            k in linha_texto
+            for k in ["VOLUME", "QUANTIDADE", "SHARES", "QTD", "NO. OF SHARES"]
+        )
+        tem_preco = any(
+            k in linha_texto
+            for k in ["PREÇO", "PRECO", "PRICE", "ABERTURA", "OPEN"]
+        )
+
+        if (tem_simbolo and tem_volume) or (tem_simbolo and tem_preco):
+            df_limpo = df_raw.iloc[idx + 1 :].copy()
+            df_limpo.columns = [
+                str(c).strip() for c in df_raw.iloc[idx].values
+            ]
+            return df_limpo.reset_index(drop=True)
+    return None
 
 
 def processar_ficheiro_importado(ficheiro):
     try:
         nome = ficheiro.name.lower()
+        df_encontrado = None
 
-        # Leitura de Ficheiro Excel (.xlsx / .xls)
         if nome.endswith((".xlsx", ".xls")):
             excel = pd.ExcelFile(ficheiro)
-            df_raw = None
+            # Prioriza folhas com nome de posições abertas
+            abas_prioritarias = [
+                s
+                for s in excel.sheet_names
+                if any(k in s.upper() for k in ["ABERTA", "OPEN", "POSI"])
+            ]
+            todas_as_abas = abas_prioritarias + [
+                s for s in excel.sheet_names if s not in abas_prioritarias
+            ]
 
-            # Procura abas de posições abertas típicas da XTB
-            for sheet in excel.sheet_names:
-                s_limpa = sheet.strip().upper()
-                if "ABERTA" in s_limpa or "OPEN" in s_limpa or "POSI" in s_limpa:
-                    df_raw = pd.read_excel(excel, sheet_name=sheet)
+            for sheet in todas_as_abas:
+                df_aba = pd.read_excel(excel, sheet_name=sheet, header=None)
+                df_tabela = localizar_tabela_com_cabecalho(df_aba)
+                if df_tabela is not None:
+                    df_encontrado = df_tabela
                     break
-
-            if df_raw is None:
-                df_raw = pd.read_excel(excel, sheet_name=0)
-
         else:
-            df_raw = pd.read_csv(ficheiro)
+            df_csv = pd.read_csv(ficheiro, header=None)
+            df_encontrado = localizar_tabela_com_cabecalho(df_csv)
+            if df_encontrado is None:
+                df_encontrado = pd.read_csv(ficheiro)
 
-        # Limpeza de nomes de colunas
-        df_raw.columns = [str(c).strip() for c in df_raw.columns]
-        colunas = df_raw.columns.tolist()
+        if df_encontrado is None:
+            return (
+                None,
+                "Não foi possível detetar a tabela de posições no ficheiro.",
+            )
 
-        # CASO 1: RELATÓRIO XTB (Aba Posições Abertas)
-        col_xtb_ticker = next(
-            (c for c in colunas if c.upper() in ["SÍMBOLO", "SIMBOLO", "SYMBOL"]),
-            None,
-        )
-        col_xtb_volume = next(
-            (c for c in colunas if c.upper() in ["VOLUME", "QUANTIDADE", "QTD"]),
-            None,
-        )
-        col_xtb_preco = next(
+        colunas = [str(c).strip() for c in df_encontrado.columns]
+        df_encontrado.columns = colunas
+
+        # CASO 1: XTB (Posições Abertas)
+        col_t = next(
             (
                 c
                 for c in colunas
-                if "PREÇO DE ABERTURA" in c.upper()
-                or "OPEN PRICE" in c.upper()
-                or "PREÇO MÉDIO" in c.upper()
+                if any(k in c.upper() for k in ["SÍMBOLO", "SIMBOLO", "SYMBOL"])
+            ),
+            None,
+        )
+        col_vol = next(
+            (
+                c
+                for c in colunas
+                if any(k in c.upper() for k in ["VOLUME", "QUANTIDADE", "QTD"])
+            ),
+            None,
+        )
+        col_p = next(
+            (
+                c
+                for c in colunas
+                if any(
+                    k in c.upper()
+                    for k in [
+                        "PREÇO DE ABERTURA",
+                        "PRECO DE ABERTURA",
+                        "OPEN PRICE",
+                        "PREÇO MÉDIO",
+                    ]
+                )
             ),
             None,
         )
 
-        if col_xtb_ticker and col_xtb_volume and col_xtb_preco:
+        if col_t and col_vol and col_p:
             linhas = []
-            for _, row in df_raw.iterrows():
-                t_raw = str(row[col_xtb_ticker]).strip()
-                if not t_raw or t_raw.lower() in ["nan", "total"]:
+            for _, row in df_encontrado.iterrows():
+                t_raw = str(row[col_t]).strip()
+                if not t_raw or t_raw.lower() in ["nan", "total", "none"]:
                     continue
 
                 t_final = normalizar_ticker_xtb(t_raw)
-                qtd = pd.to_numeric(row[col_xtb_volume], errors="coerce") or 0.0
-                preco = pd.to_numeric(row[col_xtb_preco], errors="coerce") or 0.0
-
+                qtd = pd.to_numeric(row[col_vol], errors="coerce") or 0.0
+                preco = pd.to_numeric(row[col_p], errors="coerce") or 0.0
                 moeda = "USD" if str(t_raw).endswith(".US") else "EUR"
 
                 if qtd > 0:
                     linhas.append(
                         {
                             "Ticker": t_final,
-                            "Shares": round(float(qtd), 4),
-                            "Cost_Per_Share": round(float(preco), 2),
+                            "Shares": float(qtd),
+                            "Cost_Per_Share": float(preco),
                             "Currency": moeda,
                         }
                     )
 
             if linhas:
                 df_xtb = pd.DataFrame(linhas)
-                # Agrupa se tiver ordens fracionadas do mesmo ativo
-                df_xtb_group = (
+                df_consolidado = (
                     df_xtb.groupby("Ticker")
                     .apply(
                         lambda g: pd.Series(
                             {
-                                "Shares": g["Shares"].sum(),
-                                "Cost_Per_Share": (
-                                    g["Shares"] * g["Cost_Per_Share"]
-                                ).sum()
-                                / g["Shares"].sum(),
+                                "Shares": round(g["Shares"].sum(), 4),
+                                "Cost_Per_Share": round(
+                                    (
+                                        g["Shares"] * g["Cost_Per_Share"]
+                                    ).sum()
+                                    / g["Shares"].sum(),
+                                    2,
+                                ),
                                 "Currency": g["Currency"].iloc[0],
                             }
                         )
                     )
                     .reset_index()
                 )
-                return df_xtb_group, None
+                return df_consolidado, None
 
-        # CASO 2: EXTRATO TRADING 212
-        if "Action" in colunas and (
-            "No. of shares" in colunas or "Shares" in colunas
+        # CASO 2: TRADING 212
+        if "Action" in colunas and any(
+            "shares" in c.lower() for c in colunas
         ):
-            col_shares = (
-                "No. of shares" if "No. of shares" in colunas else "Shares"
+            col_shares = next(
+                c
+                for c in colunas
+                if "shares" in c.lower() or "quantidade" in c.lower()
             )
-            col_price = (
-                "Price / share" if "Price / share" in colunas else "Price"
+            col_price = next(
+                c
+                for c in colunas
+                if "price" in c.lower() or "preço" in c.lower()
             )
             col_curr = next(
-                (c for c in colunas if "Currency" in c and "Price" in c),
-                "Currency (Price / share)",
+                (c for c in colunas if "currency" in c.lower()), None
             )
 
             carteira_calc = {}
-            for _, row in df_raw.iterrows():
+            for _, row in df_encontrado.iterrows():
                 acao = str(row["Action"]).lower()
                 ticker_orig = str(row["Ticker"]).strip().upper()
-                ticker = MAPA_TICKERS_EUROPA.get(ticker_orig, ticker_orig)
-                qtd = float(row[col_shares]) if pd.notnull(row[col_shares]) else 0.0
+                ticker = normalizar_ticker_xtb(ticker_orig)
+                qtd = (
+                    float(row[col_shares])
+                    if pd.notnull(row[col_shares])
+                    else 0.0
+                )
                 preco = (
-                    float(row[col_price]) if pd.notnull(row[col_price]) else 0.0
+                    float(row[col_price])
+                    if pd.notnull(row[col_price])
+                    else 0.0
                 )
                 moeda_op = (
                     str(row[col_curr]).strip().upper()
-                    if col_curr in df_raw.columns and pd.notnull(row[col_curr])
+                    if col_curr and pd.notnull(row[col_curr])
                     else "EUR"
                 )
 
@@ -261,11 +333,11 @@ def processar_ficheiro_importado(ficheiro):
                     pos["shares"] += qtd
                     pos["currency"] = moeda_op
                 elif "sell" in acao and pos["shares"] > 0:
-                    custo_medio = pos["total_invested"] / pos["shares"]
+                    cm = pos["total_invested"] / pos["shares"]
                     pos["shares"] = max(0.0, pos["shares"] - qtd)
-                    pos["total_invested"] = pos["shares"] * custo_medio
+                    pos["total_invested"] = pos["shares"] * cm
 
-            linhas = []
+            linhas_t212 = []
             for t, val in carteira_calc.items():
                 if val["shares"] > 0.0001:
                     pm = (
@@ -273,7 +345,7 @@ def processar_ficheiro_importado(ficheiro):
                         if val["shares"] > 0
                         else 0.0
                     )
-                    linhas.append(
+                    linhas_t212.append(
                         {
                             "Ticker": t,
                             "Shares": round(val["shares"], 4),
@@ -283,62 +355,15 @@ def processar_ficheiro_importado(ficheiro):
                             ),
                         }
                     )
-            return pd.DataFrame(linhas), None
-
-        # CASO 3: MODELO PADRÃO
-        t_col = next(
-            (c for c in colunas if c.lower() in ["ticker", "symbol", "ativo"]),
-            None,
-        )
-        s_col = next(
-            (
-                c
-                for c in colunas
-                if c.lower() in ["shares", "acoes", "ações", "qtd", "quantidade"]
-            ),
-            None,
-        )
-        c_col = next(
-            (
-                c
-                for c in colunas
-                if c.lower()
-                in ["cost_per_share", "cost", "preco_medio", "custo"]
-            ),
-            None,
-        )
-        curr_col = next(
-            (c for c in colunas if c.lower() in ["currency", "moeda"]), None
-        )
-
-        if t_col and s_col and c_col:
-            df_res = pd.DataFrame()
-            df_res["Ticker"] = (
-                df_raw[t_col]
-                .astype(str)
-                .str.strip()
-                .str.upper()
-                .apply(normalizar_ticker_xtb)
-            )
-            df_res["Shares"] = pd.to_numeric(df_raw[s_col], errors="coerce").fillna(0.0)
-            df_res["Cost_Per_Share"] = pd.to_numeric(df_raw[c_col], errors="coerce").fillna(0.0)
-            df_res["Currency"] = (
-                df_raw[curr_col]
-                .astype(str)
-                .str.upper()
-                .apply(lambda c: "USD" if "USD" in c else "EUR")
-                if curr_col
-                else "EUR"
-            )
-            return df_res[df_res["Shares"] > 0], None
+            return pd.DataFrame(linhas_t212), None
 
         return (
             None,
-            f"Colunas não reconhecidas. Foram encontradas: {', '.join(colunas[:6])}",
+            f"Não foi possível associar as colunas: {', '.join(colunas[:5])}",
         )
 
     except Exception as e:
-        return None, f"Erro ao processar ficheiro: {str(e)}"
+        return None, f"Erro ao analisar ficheiro: {str(e)}"
 
 
 # ---------------------------------------------------------
@@ -550,7 +575,7 @@ with st.sidebar:
 
         if st.button("Guardar Ativo", use_container_width=True):
             if novo_ticker:
-                t_ajustado = MAPA_TICKERS_EUROPA.get(novo_ticker, novo_ticker)
+                t_ajustado = normalizar_ticker_xtb(novo_ticker)
                 if t_ajustado in df_portfolio["Ticker"].values:
                     st.warning("O ativo já se encontra registado.")
                 else:
