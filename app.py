@@ -20,7 +20,6 @@ st.set_page_config(
 MOEDA_BASE = "€"
 CSV_FILE = "portfolio.csv"
 
-# Dicionário de conversão automática para extratos da Trading 212
 MAPA_TICKERS_EUROPA = {
     "FUSD": "FUSD.DE",
     "IDVY": "IDVY.AS",
@@ -53,7 +52,7 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# Gestão de Ficheiro Local (CSV)
+# Gestão de Ficheiro Local
 # ---------------------------------------------------------
 def carregar_portfolio():
     if not os.path.exists(CSV_FILE):
@@ -105,7 +104,7 @@ def guardar_portfolio(df):
 
 
 # ---------------------------------------------------------
-# Câmbio EUR / USD em Tempo Real
+# Câmbio EUR / USD
 # ---------------------------------------------------------
 @st.cache_data(ttl=600)
 def obter_taxa_eur_usd():
@@ -118,15 +117,108 @@ def obter_taxa_eur_usd():
 
 
 # ---------------------------------------------------------
-# Motor de Processamento de CSV
+# Motor de Leitura de Extratos (CSV & Excel / XTB / Trading 212)
 # ---------------------------------------------------------
-def processar_csv_importado(ficheiro_carregado):
-    try:
-        df_raw = pd.read_csv(ficheiro_carregado)
-        colunas = [c.strip() for c in df_raw.columns]
-        df_raw.columns = colunas
+def normalizar_ticker_xtb(ticker_raw):
+    t = str(ticker_raw).strip().upper()
+    if t.endswith(".US"):
+        return t[:-3]  # Remove .US (ex: VICI.US -> VICI)
+    if t.endswith(".NL"):
+        return t.replace(".NL", ".AS")
+    return MAPA_TICKERS_EUROPA.get(t, t)
 
-        # Formato Oficial Trading 212
+
+def processar_ficheiro_importado(ficheiro):
+    try:
+        nome = ficheiro.name.lower()
+
+        # Leitura de Ficheiro Excel (.xlsx / .xls)
+        if nome.endswith((".xlsx", ".xls")):
+            excel = pd.ExcelFile(ficheiro)
+            df_raw = None
+
+            # Procura abas de posições abertas típicas da XTB
+            for sheet in excel.sheet_names:
+                s_limpa = sheet.strip().upper()
+                if "ABERTA" in s_limpa or "OPEN" in s_limpa or "POSI" in s_limpa:
+                    df_raw = pd.read_excel(excel, sheet_name=sheet)
+                    break
+
+            if df_raw is None:
+                df_raw = pd.read_excel(excel, sheet_name=0)
+
+        else:
+            df_raw = pd.read_csv(ficheiro)
+
+        # Limpeza de nomes de colunas
+        df_raw.columns = [str(c).strip() for c in df_raw.columns]
+        colunas = df_raw.columns.tolist()
+
+        # CASO 1: RELATÓRIO XTB (Aba Posições Abertas)
+        col_xtb_ticker = next(
+            (c for c in colunas if c.upper() in ["SÍMBOLO", "SIMBOLO", "SYMBOL"]),
+            None,
+        )
+        col_xtb_volume = next(
+            (c for c in colunas if c.upper() in ["VOLUME", "QUANTIDADE", "QTD"]),
+            None,
+        )
+        col_xtb_preco = next(
+            (
+                c
+                for c in colunas
+                if "PREÇO DE ABERTURA" in c.upper()
+                or "OPEN PRICE" in c.upper()
+                or "PREÇO MÉDIO" in c.upper()
+            ),
+            None,
+        )
+
+        if col_xtb_ticker and col_xtb_volume and col_xtb_preco:
+            linhas = []
+            for _, row in df_raw.iterrows():
+                t_raw = str(row[col_xtb_ticker]).strip()
+                if not t_raw or t_raw.lower() in ["nan", "total"]:
+                    continue
+
+                t_final = normalizar_ticker_xtb(t_raw)
+                qtd = pd.to_numeric(row[col_xtb_volume], errors="coerce") or 0.0
+                preco = pd.to_numeric(row[col_xtb_preco], errors="coerce") or 0.0
+
+                moeda = "USD" if str(t_raw).endswith(".US") else "EUR"
+
+                if qtd > 0:
+                    linhas.append(
+                        {
+                            "Ticker": t_final,
+                            "Shares": round(float(qtd), 4),
+                            "Cost_Per_Share": round(float(preco), 2),
+                            "Currency": moeda,
+                        }
+                    )
+
+            if linhas:
+                df_xtb = pd.DataFrame(linhas)
+                # Agrupa se tiver ordens fracionadas do mesmo ativo
+                df_xtb_group = (
+                    df_xtb.groupby("Ticker")
+                    .apply(
+                        lambda g: pd.Series(
+                            {
+                                "Shares": g["Shares"].sum(),
+                                "Cost_Per_Share": (
+                                    g["Shares"] * g["Cost_Per_Share"]
+                                ).sum()
+                                / g["Shares"].sum(),
+                                "Currency": g["Currency"].iloc[0],
+                            }
+                        )
+                    )
+                    .reset_index()
+                )
+                return df_xtb_group, None
+
+        # CASO 2: EXTRATO TRADING 212
         if "Action" in colunas and (
             "No. of shares" in colunas or "Shares" in colunas
         ):
@@ -140,23 +232,12 @@ def processar_csv_importado(ficheiro_carregado):
                 (c for c in colunas if "Currency" in c and "Price" in c),
                 "Currency (Price / share)",
             )
-            col_ticker = "Ticker"
 
             carteira_calc = {}
-
-            if "Time" in colunas:
-                df_raw["Time"] = pd.to_datetime(df_raw["Time"], errors="coerce")
-                df_raw = df_raw.sort_values("Time", ascending=True)
-
             for _, row in df_raw.iterrows():
                 acao = str(row["Action"]).lower()
-                ticker_original = str(row[col_ticker]).strip().upper()
-
-                # Aplica o mapa para ETFs europeus conhecidos
-                ticker = MAPA_TICKERS_EUROPA.get(
-                    ticker_original, ticker_original
-                )
-
+                ticker_orig = str(row["Ticker"]).strip().upper()
+                ticker = MAPA_TICKERS_EUROPA.get(ticker_orig, ticker_orig)
                 qtd = float(row[col_shares]) if pd.notnull(row[col_shares]) else 0.0
                 preco = (
                     float(row[col_price]) if pd.notnull(row[col_price]) else 0.0
@@ -204,12 +285,12 @@ def processar_csv_importado(ficheiro_carregado):
                     )
             return pd.DataFrame(linhas), None
 
-        # Formato Padrão (Ticker, Shares, Cost_Per_Share, Currency)
-        ticker_col = next(
+        # CASO 3: MODELO PADRÃO
+        t_col = next(
             (c for c in colunas if c.lower() in ["ticker", "symbol", "ativo"]),
             None,
         )
-        shares_col = next(
+        s_col = next(
             (
                 c
                 for c in colunas
@@ -217,18 +298,12 @@ def processar_csv_importado(ficheiro_carregado):
             ),
             None,
         )
-        cost_col = next(
+        c_col = next(
             (
                 c
                 for c in colunas
                 if c.lower()
-                in [
-                    "cost_per_share",
-                    "cost",
-                    "preco_medio",
-                    "preço médio",
-                    "custo",
-                ]
+                in ["cost_per_share", "cost", "preco_medio", "custo"]
             ),
             None,
         )
@@ -236,31 +311,30 @@ def processar_csv_importado(ficheiro_carregado):
             (c for c in colunas if c.lower() in ["currency", "moeda"]), None
         )
 
-        if ticker_col and shares_col and cost_col:
+        if t_col and s_col and c_col:
             df_res = pd.DataFrame()
             df_res["Ticker"] = (
-                df_raw[ticker_col]
+                df_raw[t_col]
                 .astype(str)
                 .str.strip()
                 .str.upper()
-                .apply(lambda x: MAPA_TICKERS_EUROPA.get(x, x))
+                .apply(normalizar_ticker_xtb)
             )
-            df_res["Shares"] = pd.to_numeric(df_raw[shares_col], errors="coerce").fillna(0.0)
-            df_res["Cost_Per_Share"] = pd.to_numeric(df_raw[cost_col], errors="coerce").fillna(0.0)
-            if curr_col:
-                df_res["Currency"] = (
-                    df_raw[curr_col]
-                    .astype(str)
-                    .str.upper()
-                    .apply(lambda c: "USD" if "USD" in c else "EUR")
-                )
-            else:
-                df_res["Currency"] = "EUR"
+            df_res["Shares"] = pd.to_numeric(df_raw[s_col], errors="coerce").fillna(0.0)
+            df_res["Cost_Per_Share"] = pd.to_numeric(df_raw[c_col], errors="coerce").fillna(0.0)
+            df_res["Currency"] = (
+                df_raw[curr_col]
+                .astype(str)
+                .str.upper()
+                .apply(lambda c: "USD" if "USD" in c else "EUR")
+                if curr_col
+                else "EUR"
+            )
             return df_res[df_res["Shares"] > 0], None
 
         return (
             None,
-            "Formato não reconhecido. Confirma os nomes das colunas no ficheiro.",
+            f"Colunas não reconhecidas. Foram encontradas: {', '.join(colunas[:6])}",
         )
 
     except Exception as e:
@@ -268,7 +342,7 @@ def processar_csv_importado(ficheiro_carregado):
 
 
 # ---------------------------------------------------------
-# Obtenção de Cotações e Dividendos Reais
+# Cotações e Dividendos Reais
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def obter_dados_mercado(tickers):
@@ -367,8 +441,41 @@ with st.sidebar:
     st.header("⚙️ Gestor de Carteira")
     st.caption(f"💱 Câmbio atual: **1 EUR = {taxa_eur_usd:.4f} USD**")
 
-    # 1. EDITAR / CORRIGIR ATIVO EXISTENTE
-    with st.expander("✏️ Editar / Corrigir Ativo", expanded=True):
+    # 1. IMPORTAR (XLSX / CSV)
+    with st.expander("📥 Importar Relatório (XTB / T212)", expanded=True):
+        st.write("Suporta **Excel da XTB (`.xlsx`)** ou **CSV da Trading 212**.")
+        uploaded_file = st.file_uploader(
+            "Seleciona o ficheiro",
+            type=["xlsx", "xls", "csv"],
+            key="file_up",
+        )
+        tipo_import = st.radio(
+            "Método de Importação:",
+            ["Fundir / Adicionar", "Substituir Carteira"],
+            index=0,
+        )
+
+        if uploaded_file is not None:
+            if st.button("Executar Importação", use_container_width=True):
+                df_novo, erro = processar_ficheiro_importado(uploaded_file)
+                if erro:
+                    st.error(erro)
+                elif df_novo is not None and not df_novo.empty:
+                    if tipo_import == "Substituir Carteira":
+                        df_portfolio = df_novo
+                    else:
+                        df_portfolio = (
+                            pd.concat([df_portfolio, df_novo])
+                            .drop_duplicates(subset=["Ticker"], keep="last")
+                            .reset_index(drop=True)
+                        )
+                    guardar_portfolio(df_portfolio)
+                    st.success(f"Carregadas {len(df_novo)} posições!")
+                    st.cache_data.clear()
+                    st.rerun()
+
+    # 2. EDITAR / CORRIGIR ATIVO
+    with st.expander("✏️ Editar / Corrigir Ativo", expanded=False):
         if not df_portfolio.empty:
             ticker_para_editar = st.selectbox(
                 "Seleciona a posição:", options=df_portfolio["Ticker"].tolist()
@@ -409,11 +516,11 @@ with st.sidebar:
                 df_portfolio.at[idx_ativo, "Cost_Per_Share"] = novo_custo_edit
                 df_portfolio.at[idx_ativo, "Currency"] = moeda_edit
                 guardar_portfolio(df_portfolio)
-                st.success(f"{novo_nome_ticker} atualizado com sucesso!")
+                st.success(f"{novo_nome_ticker} atualizado!")
                 st.cache_data.clear()
                 st.rerun()
 
-    # 2. ADICIONAR MANUALMENTE
+    # 3. ADICIONAR NOVO ATIVO MANUALMENTE
     with st.expander("➕ Adicionar Novo Ativo", expanded=False):
         novo_ticker = (
             st.text_input("Ticker (ex: AAPL, O, VGWD.DE)")
@@ -463,37 +570,6 @@ with st.sidebar:
                     )
                     guardar_portfolio(df_portfolio)
                     st.success(f"{t_ajustado} adicionado!")
-                    st.cache_data.clear()
-                    st.rerun()
-
-    # 3. IMPORTAR CSV
-    with st.expander("📥 Importar Ficheiro CSV", expanded=False):
-        st.write("Suporta extratos da **Trading 212**.")
-        uploaded_file = st.file_uploader(
-            "Ficheiro CSV", type=["csv"], key="csv_up"
-        )
-        tipo_import = st.radio(
-            "Método:",
-            ["Fundir / Adicionar", "Substituir Carteira"],
-            index=0,
-        )
-
-        if uploaded_file is not None:
-            if st.button("Executar Importação", use_container_width=True):
-                df_novo, erro = processar_csv_importado(uploaded_file)
-                if erro:
-                    st.error(erro)
-                elif df_novo is not None and not df_novo.empty:
-                    if tipo_import == "Substituir Carteira":
-                        df_portfolio = df_novo
-                    else:
-                        df_portfolio = (
-                            pd.concat([df_portfolio, df_novo])
-                            .drop_duplicates(subset=["Ticker"], keep="last")
-                            .reset_index(drop=True)
-                        )
-                    guardar_portfolio(df_portfolio)
-                    st.success(f"Carregadas {len(df_novo)} posições!")
                     st.cache_data.clear()
                     st.rerun()
 
