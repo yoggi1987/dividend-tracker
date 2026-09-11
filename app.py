@@ -8,11 +8,11 @@ import streamlit as st
 import yfinance as yf
 
 # ---------------------------------------------------------
-# Configuração da Página e Moeda
+# Configuração da Página e Moeda Base
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Dividend Data Dashboard",
-    page_icon="📈",
+    page_title="Dividend Portfolio Tracker",
+    page_icon="💼",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -37,10 +37,11 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# Gestão de Dados Locais (CSV)
+# Gestão de Ficheiro Local (CSV)
 # ---------------------------------------------------------
 def carregar_portfolio():
     if not os.path.exists(CSV_FILE):
+        # Carteira inicial padrão
         dados_iniciais = pd.DataFrame(
             [
                 {
@@ -54,6 +55,24 @@ def carregar_portfolio():
                     "Shares": 81.0,
                     "Cost_Per_Share": 58.24,
                     "Currency": "EUR",
+                },
+                {
+                    "Ticker": "FUSD.DE",
+                    "Shares": 1281.0,
+                    "Cost_Per_Share": 11.81,
+                    "Currency": "EUR",
+                },
+                {
+                    "Ticker": "IDVY.AS",
+                    "Shares": 368.03,
+                    "Cost_Per_Share": 25.47,
+                    "Currency": "EUR",
+                },
+                {
+                    "Ticker": "VICI",
+                    "Shares": 7.0,
+                    "Cost_Per_Share": 22.03,
+                    "Currency": "USD",
                 },
             ]
         )
@@ -75,13 +94,150 @@ def guardar_portfolio(df):
 # ---------------------------------------------------------
 @st.cache_data(ttl=600)
 def obter_taxa_eur_usd():
-    """Devolve quantos USD vale 1 EUR (ex: 1.08) e o fator de conversão USD -> EUR"""
     try:
         forex = yf.Ticker("EURUSD=X")
-        taxa = forex.fast_info.last_price or 1.08
+        taxa = forex.fast_info.last_price or 1.16
         return taxa
     except Exception:
-        return 1.08
+        return 1.16
+
+
+# ---------------------------------------------------------
+# Motor de Processamento de CSV (Trading 212 & Genérico)
+# ---------------------------------------------------------
+def processar_csv_importado(ficheiro_carregado):
+    try:
+        df_raw = pd.read_csv(ficheiro_carregado)
+        colunas = [c.strip() for c in df_raw.columns]
+        df_raw.columns = colunas
+
+        # Formato 1: Extrato Oficial da Trading 212
+        if "Action" in colunas and (
+            "No. of shares" in colunas or "Shares" in colunas
+        ):
+            col_shares = (
+                "No. of shares" if "No. of shares" in colunas else "Shares"
+            )
+            col_price = (
+                "Price / share" if "Price / share" in colunas else "Price"
+            )
+            col_curr = next(
+                (c for c in colunas if "Currency" in c and "Price" in c),
+                "Currency (Price / share)",
+            )
+            col_ticker = "Ticker"
+
+            carteira_calc = {}
+
+            if "Time" in colunas:
+                df_raw["Time"] = pd.to_datetime(df_raw["Time"], errors="coerce")
+                df_raw = df_raw.sort_values("Time", ascending=True)
+
+            for _, row in df_raw.iterrows():
+                acao = str(row["Action"]).lower()
+                ticker = str(row[col_ticker]).strip().upper()
+                qtd = float(row[col_shares]) if pd.notnull(row[col_shares]) else 0.0
+                preco = (
+                    float(row[col_price]) if pd.notnull(row[col_price]) else 0.0
+                )
+                moeda_op = (
+                    str(row[col_curr]).strip().upper()
+                    if col_curr in df_raw.columns and pd.notnull(row[col_curr])
+                    else "EUR"
+                )
+
+                if ticker not in carteira_calc:
+                    carteira_calc[ticker] = {
+                        "shares": 0.0,
+                        "total_invested": 0.0,
+                        "currency": moeda_op,
+                    }
+
+                pos = carteira_calc[ticker]
+                if "buy" in acao:
+                    pos["total_invested"] += qtd * preco
+                    pos["shares"] += qtd
+                    pos["currency"] = moeda_op
+                elif "sell" in acao and pos["shares"] > 0:
+                    custo_medio = pos["total_invested"] / pos["shares"]
+                    pos["shares"] = max(0.0, pos["shares"] - qtd)
+                    pos["total_invested"] = pos["shares"] * custo_medio
+
+            linhas = []
+            for t, val in carteira_calc.items():
+                if val["shares"] > 0.0001:
+                    pm = (
+                        val["total_invested"] / val["shares"]
+                        if val["shares"] > 0
+                        else 0.0
+                    )
+                    linhas.append(
+                        {
+                            "Ticker": t,
+                            "Shares": round(val["shares"], 4),
+                            "Cost_Per_Share": round(pm, 2),
+                            "Currency": (
+                                "USD" if "USD" in val["currency"] else "EUR"
+                            ),
+                        }
+                    )
+            return pd.DataFrame(linhas), None
+
+        # Formato 2: Ficheiro Padrão (Ticker, Shares, Cost_Per_Share, [Currency])
+        ticker_col = next(
+            (c for c in colunas if c.lower() in ["ticker", "symbol", "ativo"]),
+            None,
+        )
+        shares_col = next(
+            (
+                c
+                for c in colunas
+                if c.lower() in ["shares", "acoes", "ações", "qtd", "quantidade"]
+            ),
+            None,
+        )
+        cost_col = next(
+            (
+                c
+                for c in colunas
+                if c.lower()
+                in [
+                    "cost_per_share",
+                    "cost",
+                    "preco_medio",
+                    "preço médio",
+                    "custo",
+                ]
+            ),
+            None,
+        )
+        curr_col = next(
+            (c for c in colunas if c.lower() in ["currency", "moeda"]), None
+        )
+
+        if ticker_col and shares_col and cost_col:
+            df_res = pd.DataFrame()
+            df_res["Ticker"] = df_raw[ticker_col].astype(str).str.strip().str.upper()
+            df_res["Shares"] = pd.to_numeric(df_raw[shares_col], errors="coerce").fillna(0.0)
+            df_res["Cost_Per_Share"] = pd.to_numeric(df_raw[cost_col], errors="coerce").fillna(0.0)
+            if curr_col:
+                df_res["Currency"] = (
+                    df_raw[curr_col]
+                    .astype(str)
+                    .str.upper()
+                    .apply(lambda c: "USD" if "USD" in c else "EUR")
+                )
+            else:
+                df_res["Currency"] = "EUR"
+            return df_res[df_res["Shares"] > 0], None
+
+        return (
+            None,
+            "Formato não reconhecido. Certifica-te de que o ficheiro tem colunas válidas.",
+        )
+
+    except Exception as e:
+        return None, f"Erro ao ler CSV: {str(e)}"
 
 
 # ---------------------------------------------------------
@@ -111,7 +267,6 @@ def obter_dados_mercado(tickers):
             div_rate = info.get("dividendRate", 0.0) or 0.0
             div_yield = info.get("dividendYield", 0.0) or 0.0
 
-            # Detetar pagamentos históricos para ETFs ou ações
             pagamentos_mes = {m: 0.0 for m in range(1, 13)}
             try:
                 hist_divs = ticker_obj.dividends
@@ -147,7 +302,6 @@ def obter_dados_mercado(tickers):
             elif div_rate == 0.0 and div_yield > 0 and preco > 0:
                 div_rate = preco * div_yield
 
-            # Moeda nativa do ativo
             moeda_ativo = fast_info.currency or info.get("currency", "EUR")
             moeda_ativo = moeda_ativo.upper()
             nome = info.get("shortName", t)
@@ -177,7 +331,7 @@ def obter_dados_mercado(tickers):
 
 
 # ---------------------------------------------------------
-# Sidebar: Gestão de Carteira
+# Sidebar: Gestão de Carteira & Importação
 # ---------------------------------------------------------
 df_portfolio = carregar_portfolio()
 taxa_eur_usd = obter_taxa_eur_usd()
@@ -186,7 +340,51 @@ with st.sidebar:
     st.header("⚙️ Gestor de Carteira")
     st.caption(f"💱 Câmbio atual: **1 EUR = {taxa_eur_usd:.4f} USD**")
 
-    with st.expander("➕ Adicionar Manualmente", expanded=True):
+    # 1. IMPORTAR CSV (DISPONÍVEL AQUI)
+    with st.expander("📥 Importar Ficheiro CSV", expanded=False):
+        st.write("Suporta **extratos da Trading 212** ou ficheiro modelo.")
+
+        modelo_csv = "Ticker,Shares,Cost_Per_Share,Currency\nVGWD.DE,195.0,77.06,EUR\nFUSD.DE,1281.0,11.81,EUR\nVICI,7.0,22.03,USD\n"
+        st.download_button(
+            label="📄 Descarregar Modelo CSV",
+            data=modelo_csv,
+            file_name="modelo_carteira.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        uploaded_file = st.file_uploader(
+            "Seleciona o ficheiro CSV", type=["csv"], key="csv_uploader"
+        )
+        tipo_import = st.radio(
+            "Método de Importação:",
+            options=["Substituir Carteira", "Fundir / Adicionar"],
+            index=0,
+        )
+
+        if uploaded_file is not None:
+            if st.button("Executar Importação", use_container_width=True):
+                df_novo, erro = processar_csv_importado(uploaded_file)
+                if erro:
+                    st.error(erro)
+                elif df_novo is not None and not df_novo.empty:
+                    if tipo_import == "Substituir Carteira":
+                        df_portfolio = df_novo
+                    else:
+                        df_portfolio = (
+                            pd.concat([df_portfolio, df_novo])
+                            .drop_duplicates(subset=["Ticker"], keep="last")
+                            .reset_index(drop=True)
+                        )
+                    guardar_portfolio(df_portfolio)
+                    st.success(
+                        f"Importados com sucesso {len(df_novo)} ativos!"
+                    )
+                    st.cache_data.clear()
+                    st.rerun()
+
+    # 2. ADICIONAR MANUALMENTE
+    with st.expander("➕ Adicionar Manualmente", expanded=False):
         novo_ticker = (
             st.text_input("Ticker (ex: AAPL, O, VGWD.DE)")
             .strip()
@@ -226,6 +424,7 @@ with st.sidebar:
                     st.cache_data.clear()
                     st.rerun()
 
+    # 3. REMOVER ATIVO
     with st.expander("🗑️ Remover Ativo", expanded=False):
         if not df_portfolio.empty:
             ticker_remover = st.selectbox(
@@ -275,16 +474,12 @@ for _, row in df_portfolio.iterrows():
     native_currency = m_info.get("Currency_Native", "EUR")
     monthly_sched_native = m_info.get("Monthly_Schedule_Native", {})
 
-    # Fator para converter nativo para EUR
     fator_conversao_eur = (
         (1.0 / taxa_eur_usd) if native_currency == "USD" else 1.0
     )
 
-    # Conversão do preço de mercado para EUR
     price_eur = curr_price_native * fator_conversao_eur
     prev_close_eur = prev_close_native * fator_conversao_eur
-
-    # Conversão do custo de compra para EUR (se inserido em USD)
     cost_eur = (
         (cost_input / taxa_eur_usd)
         if currency_input == "USD"
@@ -307,12 +502,11 @@ for _, row in df_portfolio.iterrows():
     )
 
     for m in range(1, 13):
-        div_mes = (
+        distribuicao_mensal_eur[m] += (
             monthly_sched_native.get(m, 0.0)
             * fator_conversao_eur
             * shares
         )
-        distribuicao_mensal_eur[m] += div_mes
 
     dados_processados.append(
         {
