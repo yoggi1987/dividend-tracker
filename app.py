@@ -8,7 +8,7 @@ import streamlit as st
 import yfinance as yf
 
 # ---------------------------------------------------------
-# Configuração da Página e Moeda Base
+# Configuração da Página e Tema
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Dividend Portfolio Tracker",
@@ -19,11 +19,13 @@ st.set_page_config(
 
 MOEDA_BASE = "€"
 CSV_FILE = "portfolio.csv"
+HIST_FILE = "history_stats.csv"
 
 MAPA_TICKERS_EUROPA = {
     "FUSD": "FUSD.DE",
     "IDVY": "IDVY.AS",
     "VGWD": "VGWD.DE",
+    "VGWE": "VGWE.DE",
     "VHYL": "VHYL.AS",
     "IQQE": "IQQE.DE",
     "VWCE": "VWCE.DE",
@@ -33,6 +35,19 @@ MAPA_TICKERS_EUROPA = {
     "IS3N": "IS3N.DE",
     "EUNL": "EUNL.DE",
     "VUSA": "VUSA.AS",
+    "SMH": "SMH.DE",
+}
+
+MAPA_PAISES_IRS = {
+    "US": "840 - Estados Unidos",
+    "IE": "372 - Irlanda",
+    "DE": "276 - Alemanha",
+    "NL": "528 - Países Baixos",
+    "FR": "250 - França",
+    "GB": "826 - Reino Unido",
+    "JP": "392 - Japão",
+    "CN": "156 - China",
+    "PT": "620 - Portugal",
 }
 
 st.markdown(
@@ -52,7 +67,7 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# Gestão de Ficheiro Local (portfolio.csv)
+# Gestão de Estado e Ficheiros Locais
 # ---------------------------------------------------------
 def carregar_portfolio():
     if not os.path.exists(CSV_FILE):
@@ -60,31 +75,31 @@ def carregar_portfolio():
             [
                 {
                     "Ticker": "VGWD.DE",
-                    "Shares": 170.0,
-                    "Cost_Per_Share": 76.50,
+                    "Shares": 195.10,
+                    "Cost_Per_Share": 77.06,
                     "Currency": "EUR",
                 },
                 {
                     "Ticker": "IQQE.DE",
-                    "Shares": 78.28,
-                    "Cost_Per_Share": 58.26,
+                    "Shares": 81.00,
+                    "Cost_Per_Share": 58.24,
                     "Currency": "EUR",
                 },
                 {
                     "Ticker": "FUSD.DE",
-                    "Shares": 1281.0,
+                    "Shares": 1282.00,
                     "Cost_Per_Share": 11.81,
                     "Currency": "EUR",
                 },
                 {
                     "Ticker": "IDVY.AS",
-                    "Shares": 368.03,
+                    "Shares": 368.04,
                     "Cost_Per_Share": 25.47,
                     "Currency": "EUR",
                 },
                 {
                     "Ticker": "VICI",
-                    "Shares": 7.0,
+                    "Shares": 7.00,
                     "Cost_Per_Share": 22.01,
                     "Currency": "USD",
                 },
@@ -103,6 +118,29 @@ def guardar_portfolio(df):
     df.to_csv(CSV_FILE, index=False)
 
 
+def carregar_stats_historico():
+    default_stats = {
+        "divs_recebidos": 634.73,
+        "ganho_realizado": 1445.11,
+        "custos_transacao": 25.39,
+        "trocas": 0.00,
+        "custos_correntes": 53.95,
+        "tir": 14.92,
+        "twr": 16.47,
+    }
+    if os.path.exists(HIST_FILE):
+        try:
+            df_h = pd.read_csv(HIST_FILE)
+            return df_h.iloc[0].to_dict()
+        except Exception:
+            return default_stats
+    return default_stats
+
+
+def guardar_stats_historico(stats_dict):
+    pd.DataFrame([stats_dict]).to_csv(HIST_FILE, index=False)
+
+
 # ---------------------------------------------------------
 # Câmbio EUR / USD em Tempo Real
 # ---------------------------------------------------------
@@ -117,7 +155,7 @@ def obter_taxa_eur_usd():
 
 
 # ---------------------------------------------------------
-# Motor de Leitura de Extratos (XTB Excel & Trading 212 CSV)
+# Motor de Leitura de Extratos (XTB Excel & T212 CSV)
 # ---------------------------------------------------------
 def normalizar_ticker(t_raw):
     t = str(t_raw).strip().upper()
@@ -134,225 +172,366 @@ def normalizar_ticker(t_raw):
 def processar_ficheiro_importado(ficheiro):
     try:
         nome = ficheiro.name.lower()
-
-        if nome.endswith((".xlsx", ".xls")):
-            excel = pd.ExcelFile(ficheiro)
-            sheet_target = None
-            for s in excel.sheet_names:
-                s_low = s.lower()
-                if ("open" in s_low or "aberta" in s_low) and not (
-                    "close" in s_low or "fech" in s_low
-                ):
-                    sheet_target = s
-                    break
-            if not sheet_target:
-                for s in excel.sheet_names:
-                    if "open" in s.lower() or "aberta" in s.lower():
-                        sheet_target = s
-                        break
-            if not sheet_target:
-                sheet_target = excel.sheet_names[-1]
-
-            df_raw = pd.read_excel(excel, sheet_name=sheet_target, header=None)
-        else:
-            df_raw = pd.read_csv(ficheiro, header=None)
-
-        header_idx = None
-        for idx in range(min(35, len(df_raw))):
-            row_vals = [
-                str(v).strip().lower()
-                for v in df_raw.iloc[idx].values
-                if pd.notnull(v)
-            ]
-            if any(
-                k in row_vals
-                for k in [
-                    "ticker",
-                    "action",
-                    "símbolo",
-                    "simbolo",
-                    "symbol",
-                    "instrument",
-                ]
-            ):
-                header_idx = idx
-                break
-
-        if header_idx is None:
-            df_data = df_raw.copy()
-            df_data.columns = [str(c).strip() for c in df_data.iloc[0].values]
-            df_data = df_data.iloc[1:].reset_index(drop=True)
-        else:
-            df_data = df_raw.iloc[header_idx + 1 :].copy()
-            df_data.columns = [
-                str(c).strip() for c in df_raw.iloc[header_idx].values
-            ]
-
-        cols_lower = {
-            str(c).strip().lower(): str(c).strip() for c in df_data.columns
+        dados_apuramento = {
+            "holdings": pd.DataFrame(),
+            "closed_trades": [],
+            "divs_total": 0.0,
+            "realized_pl": 0.0,
+            "fees_total": 0.0,
+            "tipo_ficheiro": "",
         }
 
-        # 1. FORMATO XTB (Folha Open Positions)
-        if any(
-            k in cols_lower for k in ["ticker", "símbolo", "simbolo", "symbol"]
-        ) and any(k in cols_lower for k in ["volume", "quantidade", "qtd"]):
-            c_tick = next(
-                v
-                for k, v in cols_lower.items()
-                if k in ["ticker", "símbolo", "simbolo", "symbol"]
-            )
-            c_vol = next(
-                v
-                for k, v in cols_lower.items()
-                if k in ["volume", "quantidade", "qtd"]
-            )
-            c_prc = next(
+        # CASO 1: RELATÓRIO EXCEL DA XTB (.XLSX)
+        if nome.endswith((".xlsx", ".xls")):
+            dados_apuramento["tipo_ficheiro"] = "XTB"
+            excel = pd.ExcelFile(ficheiro)
+
+            # 1. Posições Abertas (Holdings)
+            open_sheet = next(
                 (
-                    v
-                    for k, v in cols_lower.items()
-                    if any(
-                        p in k
-                        for p in [
-                            "open price",
-                            "preço de abertura",
-                            "preco de abertura",
-                            "preço médio",
-                            "preço",
-                            "preco",
-                            "open",
-                        ]
-                    )
+                    s
+                    for s in excel.sheet_names
+                    if ("open" in s.lower() or "aberta" in s.lower())
+                    and not ("close" in s.lower() or "fech" in s.lower())
                 ),
                 None,
             )
-            c_type = next(
-                (v for k, v in cols_lower.items() if k in ["type", "tipo"]),
+            if open_sheet:
+                df_raw = pd.read_excel(
+                    excel, sheet_name=open_sheet, header=None
+                )
+                h_idx = None
+                for i in range(min(30, len(df_raw))):
+                    r = [
+                        str(v).strip().lower()
+                        for v in df_raw.iloc[i].values
+                        if pd.notnull(v)
+                    ]
+                    if "ticker" in r and ("volume" in r or "open price" in r):
+                        h_idx = i
+                        break
+                if h_idx is not None:
+                    df_d = df_raw.iloc[h_idx + 1 :].copy()
+                    df_d.columns = [
+                        str(v).strip() for v in df_raw.iloc[h_idx].values
+                    ]
+
+                    c_type = next(
+                        (c for c in df_d.columns if c.lower() == "type"), None
+                    )
+                    c_tick = next(
+                        (c for c in df_d.columns if c.lower() == "ticker"),
+                        None,
+                    )
+                    c_vol = next(
+                        (c for c in df_d.columns if c.lower() == "volume"),
+                        None,
+                    )
+                    c_prc = next(
+                        (
+                            c
+                            for c in df_d.columns
+                            if "open price" in c.lower() or "preço" in c.lower()
+                        ),
+                        None,
+                    )
+
+                    sub = (
+                        df_d[
+                            df_d[c_type]
+                            .astype(str)
+                            .str.upper()
+                            .str.contains("BUY", na=False)
+                        ].copy()
+                        if c_type
+                        else df_d.copy()
+                    )
+                    sub[c_vol] = pd.to_numeric(sub[c_vol], errors="coerce")
+                    sub[c_prc] = pd.to_numeric(sub[c_prc], errors="coerce")
+                    sub = sub.dropna(subset=[c_vol, c_prc])
+                    sub = sub[sub[c_vol] > 0]
+
+                    linhas_h = []
+                    for _, row in sub.iterrows():
+                        raw_t = str(row[c_tick]).strip().upper()
+                        t_norm = normalizar_ticker(raw_t)
+                        moeda = "USD" if raw_t.endswith(".US") else "EUR"
+                        linhas_h.append(
+                            {
+                                "Ticker": t_norm,
+                                "Shares": float(row[c_vol]),
+                                "Cost_Per_Share": float(row[c_prc]),
+                                "Currency": moeda,
+                            }
+                        )
+
+                    if linhas_h:
+                        df_h = pd.DataFrame(linhas_h)
+                        dados_apuramento["holdings"] = (
+                            df_h.groupby("Ticker")
+                            .apply(
+                                lambda g: pd.Series(
+                                    {
+                                        "Shares": round(
+                                            float(g["Shares"].sum()), 4
+                                        ),
+                                        "Cost_Per_Share": round(
+                                            float(
+                                                (
+                                                    g["Shares"]
+                                                    * g["Cost_Per_Share"]
+                                                ).sum()
+                                                / g["Shares"].sum()
+                                            ),
+                                            2,
+                                        ),
+                                        "Currency": g["Currency"].iloc[0],
+                                    }
+                                )
+                            )
+                            .reset_index()
+                        )
+
+            # 2. Posições Fechadas (Ganhos Realizados e IRS)
+            closed_sheet = next(
+                (
+                    s
+                    for s in excel.sheet_names
+                    if "close" in s.lower() or "fech" in s.lower()
+                ),
                 None,
             )
-
-            if c_prc:
-                df_sub = df_data.copy()
-                if c_type and c_type in df_sub.columns:
-                    buys = df_sub[
-                        df_sub[c_type]
-                        .astype(str)
-                        .str.upper()
-                        .str.contains("BUY", na=False)
+            if closed_sheet:
+                df_raw = pd.read_excel(
+                    excel, sheet_name=closed_sheet, header=None
+                )
+                h_idx = None
+                for i in range(min(30, len(df_raw))):
+                    r = [
+                        str(v).strip().lower()
+                        for v in df_raw.iloc[i].values
+                        if pd.notnull(v)
                     ]
-                    if not buys.empty:
-                        df_sub = buys
+                    if "ticker" in r and (
+                        "profit/loss" in r or "close price" in r
+                    ):
+                        h_idx = i
+                        break
+                if h_idx is not None:
+                    df_c = df_raw.iloc[h_idx + 1 :].copy()
+                    df_c.columns = [
+                        str(v).strip() for v in df_raw.iloc[h_idx].values
+                    ]
+                    for _, row in df_c.iterrows():
+                        t = str(row.get("Ticker", "")).strip().upper()
+                        if not t or t in ["NAN", "NONE", "TOTAL"]:
+                            continue
+                        pl = (
+                            pd.to_numeric(
+                                row.get("Profit/Loss"), errors="coerce"
+                            )
+                            or 0.0
+                        )
+                        dados_apuramento["realized_pl"] += pl
 
-                df_sub[c_vol] = pd.to_numeric(df_sub[c_vol], errors="coerce")
-                df_sub[c_prc] = pd.to_numeric(df_sub[c_prc], errors="coerce")
-                df_sub = df_sub.dropna(subset=[c_vol, c_prc])
-                df_sub = df_sub[df_sub[c_vol] > 0]
+                        dt_c = pd.to_datetime(
+                            row.get("Close Time (UTC)"), errors="coerce"
+                        )
+                        p_val = (
+                            pd.to_numeric(
+                                row.get("Purchase Value"), errors="coerce"
+                            )
+                            or 0.0
+                        )
+                        s_val = (
+                            pd.to_numeric(
+                                row.get("Sale Value"), errors="coerce"
+                            )
+                            or 0.0
+                        )
 
-                linhas = []
-                for _, r in df_sub.iterrows():
-                    raw_t = str(r[c_tick]).strip().upper()
-                    if not raw_t or raw_t in ["NAN", "TOTAL", "NONE"]:
-                        continue
-                    t_norm = normalizar_ticker(raw_t)
-                    moeda = "USD" if raw_t.endswith(".US") else "EUR"
-                    linhas.append(
-                        {
-                            "Ticker": t_norm,
-                            "Shares": float(r[c_vol]),
-                            "Cost_Per_Share": float(r[c_prc]),
-                            "Currency": moeda,
-                        }
-                    )
-
-                df_xtb = pd.DataFrame(linhas)
-                if not df_xtb.empty:
-                    df_res = (
-                        df_xtb.groupby("Ticker")
-                        .apply(
-                            lambda g: pd.Series(
-                                {
-                                    "Shares": round(
-                                        float(g["Shares"].sum()), 4
-                                    ),
-                                    "Cost_Per_Share": round(
-                                        float(
-                                            (
-                                                g["Shares"]
-                                                * g["Cost_Per_Share"]
-                                            ).sum()
-                                            / g["Shares"].sum()
-                                        ),
-                                        2,
-                                    ),
-                                    "Currency": g["Currency"].iloc[0],
-                                }
+                        pais = (
+                            "620 - Portugal"
+                            if t.endswith(".PT")
+                            else (
+                                "276 - Alemanha"
+                                if t.endswith(".DE")
+                                else "840 - Estados Unidos"
                             )
                         )
-                        .reset_index()
+                        quadro = (
+                            "Anexo G (Nacional)"
+                            if t.endswith(".PT")
+                            else "Anexo J - Quadro 9.2A"
+                        )
+
+                        dados_apuramento["closed_trades"].append(
+                            {
+                                "Corretora": "XTB",
+                                "Ticker": t,
+                                "Nome": str(row.get("Instrument", t)),
+                                "País": pais,
+                                "Quadro IRS": quadro,
+                                "Data Venda": dt_c.strftime("%Y-%m-%d")
+                                if pd.notnull(dt_c)
+                                else "2026",
+                                "Ano/Mês": dt_c.strftime("%Y-%m")
+                                if pd.notnull(dt_c)
+                                else "2026",
+                                "Valor Venda (€)": round(s_val, 2),
+                                "Valor Compra (€)": round(p_val, 2),
+                                "Mais/Menos-valia (€)": round(pl, 2),
+                            }
+                        )
+
+            # 3. Dividendos e Custos de Caixa
+            cash_sheet = next(
+                (
+                    s
+                    for s in excel.sheet_names
+                    if "cash" in s.lower() or "caixa" in s.lower()
+                ),
+                None,
+            )
+            if cash_sheet:
+                df_raw = pd.read_excel(
+                    excel, sheet_name=cash_sheet, header=None
+                )
+                h_idx = None
+                for i in range(min(30, len(df_raw))):
+                    r = [
+                        str(v).strip().lower()
+                        for v in df_raw.iloc[i].values
+                        if pd.notnull(v)
+                    ]
+                    if "type" in r and "amount" in r:
+                        h_idx = i
+                        break
+                if h_idx is not None:
+                    df_cash = df_raw.iloc[h_idx + 1 :].copy()
+                    df_cash.columns = [
+                        str(v).strip() for v in df_raw.iloc[h_idx].values
+                    ]
+                    df_cash["Amount"] = pd.to_numeric(
+                        df_cash["Amount"], errors="coerce"
                     )
-                    return df_res, None
+                    for _, row in df_cash.iterrows():
+                        tp = str(row.get("Type", "")).strip().lower()
+                        amt = float(row.get("Amount", 0.0))
+                        if "dividend" in tp:
+                            dados_apuramento["divs_total"] += amt
 
-        # 2. FORMATO TRADING 212
-        if "action" in cols_lower and any(
-            "shares" in c or "volume" in c for c in cols_lower
-        ):
-            c_action = cols_lower["action"]
-            c_ticker = next(
-                v
-                for k, v in cols_lower.items()
-                if k in ["ticker", "symbol", "ativo"]
-            )
-            c_shares = next(
-                v
-                for k, v in cols_lower.items()
-                if "shares" in k or "volume" in k or "quantidade" in k
-            )
-            c_price = next(
-                v
-                for k, v in cols_lower.items()
-                if "price" in k or "preço" in k or "preco" in k
-            )
-            c_curr = next(
-                (v for k, v in cols_lower.items() if "currency" in k), None
+            return dados_apuramento, None
+
+        # CASO 2: EXTRATO CSV DA TRADING 212
+        else:
+            dados_apuramento["tipo_ficheiro"] = "Trading 212"
+            df_raw = pd.read_csv(ficheiro)
+            df_raw.columns = [str(c).strip() for c in df_raw.columns]
+
+            # Dividendos
+            divs = df_raw[
+                df_raw["Action"]
+                .astype(str)
+                .str.contains("Dividend", case=False, na=False)
+            ]
+            dados_apuramento["divs_total"] = float(
+                pd.to_numeric(divs["Total"], errors="coerce").sum()
             )
 
-            carteira_calc = {}
-            for _, r in df_data.iterrows():
-                act = str(r[c_action]).lower()
-                raw_t = str(r[c_ticker]).strip().upper()
-                t_norm = normalizar_ticker(raw_t)
-                qtd = pd.to_numeric(r[c_shares], errors="coerce") or 0.0
-                prc = pd.to_numeric(r[c_price], errors="coerce") or 0.0
-                curr_op = (
-                    str(r[c_curr]).strip().upper()
-                    if c_curr and pd.notnull(r[c_curr])
-                    else "EUR"
+            # Taxas e custos de conversão
+            c_conv = pd.to_numeric(
+                df_raw.get("Currency conversion fee", 0.0), errors="coerce"
+            ).sum()
+            c_ftt = pd.to_numeric(
+                df_raw.get("French transaction tax", 0.0), errors="coerce"
+            ).sum()
+            dados_apuramento["fees_total"] = float(c_conv + c_ftt)
+
+            # Vendas realizadas e IRS Anexo J
+            sells = df_raw[
+                df_raw["Action"].isin(["Market sell", "Limit sell"])
+            ].copy()
+            for _, r in sells.iterrows():
+                isin = str(r.get("ISIN", ""))
+                country_code = isin[:2] if len(isin) >= 2 else "US"
+                country_name = MAPA_PAISES_IRS.get(
+                    country_code, f"{country_code} - Estrangeiro"
                 )
 
-                if t_norm not in carteira_calc:
-                    carteira_calc[t_norm] = {
-                        "shares": 0.0,
-                        "total_invested": 0.0,
-                        "currency": curr_op,
-                    }
+                dt_venda = pd.to_datetime(
+                    r.get("Time (UTC)"), errors="coerce"
+                )
+                val_venda = (
+                    float(r.get("Total", 0.0))
+                    if r.get("Currency (Total)") == "EUR"
+                    else (float(r.get("Total", 0.0)) / 1.08)
+                )
+                res = (
+                    float(r.get("Result", 0.0))
+                    if r.get("Currency (Result)") == "EUR"
+                    else (float(r.get("Result", 0.0)) / 1.08)
+                )
+                val_compra = val_venda - res
+                dados_apuramento["realized_pl"] += res
 
-                pos = carteira_calc[t_norm]
-                if "buy" in act:
-                    pos["total_invested"] += qtd * prc
-                    pos["shares"] += qtd
-                    pos["currency"] = curr_op
-                elif "sell" in act and pos["shares"] > 0:
-                    custo_m = pos["total_invested"] / pos["shares"]
-                    pos["shares"] = max(0.0, pos["shares"] - qtd)
-                    pos["total_invested"] = pos["shares"] * custo_m
+                dados_apuramento["closed_trades"].append(
+                    {
+                        "Corretora": "Trading 212",
+                        "Ticker": r.get("Ticker", ""),
+                        "Nome": r.get("Name", r.get("Ticker", "")),
+                        "País": country_name,
+                        "Quadro IRS": "Anexo J - Quadro 9.2A",
+                        "Data Venda": dt_venda.strftime("%Y-%m-%d")
+                        if pd.notnull(dt_venda)
+                        else "2026",
+                        "Ano/Mês": dt_venda.strftime("%Y-%m")
+                        if pd.notnull(dt_venda)
+                        else "2026",
+                        "Valor Venda (€)": round(val_venda, 2),
+                        "Valor Compra (€)": round(val_compra, 2),
+                        "Mais/Menos-valia (€)": round(res, 2),
+                    }
+                )
+
+            # Posições vivas (Holdings)
+            df_sorted = df_raw.sort_values("Time (UTC)", ascending=True)
+            carteira_calc = {}
+            for _, r in df_sorted.iterrows():
+                act = str(r.get("Action", "")).lower()
+                if "buy" in act or "sell" in act:
+                    raw_t = str(r.get("Ticker", "")).strip().upper()
+                    t_norm = normalizar_ticker(raw_t)
+                    qtd = (
+                        pd.to_numeric(r.get("No. of shares"), errors="coerce")
+                        or 0.0
+                    )
+                    tot = pd.to_numeric(r.get("Total"), errors="coerce") or 0.0
+                    moeda_prc = str(
+                        r.get("Currency (Price / share)", "EUR")
+                    ).upper()
+
+                    if t_norm not in carteira_calc:
+                        carteira_calc[t_norm] = {
+                            "shares": 0.0,
+                            "invested_eur": 0.0,
+                            "currency": moeda_prc,
+                        }
+
+                    pos = carteira_calc[t_norm]
+                    if "buy" in act:
+                        pos["invested_eur"] += tot
+                        pos["shares"] += qtd
+                        pos["currency"] = moeda_prc
+                    elif "sell" in act and pos["shares"] > 0:
+                        cm = pos["invested_eur"] / pos["shares"]
+                        pos["shares"] = max(0.0, pos["shares"] - qtd)
+                        pos["invested_eur"] = pos["shares"] * cm
 
             linhas_t212 = []
             for t, val in carteira_calc.items():
-                if val["shares"] > 0.0001:
-                    pm = (
-                        val["total_invested"] / val["shares"]
-                        if val["shares"] > 0
-                        else 0.0
-                    )
+                if val["shares"] > 0.001:
+                    pm = val["invested_eur"] / val["shares"]
                     linhas_t212.append(
                         {
                             "Ticker": t,
@@ -363,15 +542,11 @@ def processar_ficheiro_importado(ficheiro):
                             ),
                         }
                     )
-            return pd.DataFrame(linhas_t212), None
-
-        return (
-            None,
-            "Não foi possível detetar o formato das colunas do ficheiro.",
-        )
+            dados_apuramento["holdings"] = pd.DataFrame(linhas_t212)
+            return dados_apuramento, None
 
     except Exception as e:
-        return None, f"Erro ao processar ficheiro: {str(e)}"
+        return None, f"Erro no processamento: {str(e)}"
 
 
 # ---------------------------------------------------------
@@ -391,12 +566,11 @@ def obter_dados_mercado(tickers):
 
             preco = fast_info.last_price or 0.0
             preco_anterior = fast_info.previous_close or preco
-
-            variacao_dia_pct = 0.0
-            if preco and preco_anterior:
-                variacao_dia_pct = (
-                    (preco - preco_anterior) / preco_anterior
-                ) * 100
+            variacao_dia_pct = (
+                ((preco - preco_anterior) / preco_anterior) * 100
+                if preco and preco_anterior
+                else 0.0
+            )
 
             div_rate = info.get("dividendRate", 0.0) or 0.0
             div_yield = info.get("dividendYield", 0.0) or 0.0
@@ -436,8 +610,9 @@ def obter_dados_mercado(tickers):
             elif div_rate == 0.0 and div_yield > 0 and preco > 0:
                 div_rate = preco * div_yield
 
-            moeda_ativo = fast_info.currency or info.get("currency", "EUR")
-            moeda_ativo = moeda_ativo.upper()
+            moeda_ativo = (
+                fast_info.currency or info.get("currency", "EUR")
+            ).upper()
             nome = info.get("shortName", t)
 
             dados[t] = {
@@ -468,6 +643,7 @@ def obter_dados_mercado(tickers):
 # Sidebar: Gestão de Carteira & Importação
 # ---------------------------------------------------------
 df_portfolio = carregar_portfolio()
+stats_hist = carregar_stats_historico()
 taxa_eur_usd = obter_taxa_eur_usd()
 
 with st.sidebar:
@@ -476,11 +652,9 @@ with st.sidebar:
 
     # 1. IMPORTAR EXCEL (XTB) OU CSV (TRADING 212)
     with st.expander("📥 Importar Relatório (XTB / T212)", expanded=True):
-        st.write("Suporta **Excel da XTB (`.xlsx`)** ou **CSV da Trading 212**.")
+        st.write("Carrega o **Excel da XTB** ou o **CSV da Trading 212**.")
         uploaded_file = st.file_uploader(
-            "Seleciona o ficheiro",
-            type=["xlsx", "xls", "csv"],
-            key="file_up",
+            "Ficheiro", type=["xlsx", "xls", "csv"], key="file_up"
         )
         tipo_import = st.radio(
             "Método de Importação:",
@@ -490,26 +664,128 @@ with st.sidebar:
 
         if uploaded_file is not None:
             if st.button("Executar Importação", use_container_width=True):
-                df_novo, erro = processar_ficheiro_importado(uploaded_file)
+                res_dados, erro = processar_ficheiro_importado(uploaded_file)
                 if erro:
                     st.error(erro)
-                elif df_novo is not None and not df_novo.empty:
-                    if tipo_import == "Substituir Carteira":
-                        df_portfolio = df_novo
-                    else:
-                        df_portfolio = (
-                            pd.concat([df_portfolio, df_novo])
-                            .drop_duplicates(subset=["Ticker"], keep="last")
-                            .reset_index(drop=True)
+                elif res_dados is not None:
+                    df_novo = res_dados["holdings"]
+                    if not df_novo.empty:
+                        if tipo_import == "Substituir Carteira":
+                            df_portfolio = df_novo
+                        else:
+                            df_portfolio = (
+                                pd.concat([df_portfolio, df_novo])
+                                .drop_duplicates(subset=["Ticker"], keep="last")
+                                .reset_index(drop=True)
+                            )
+                        guardar_portfolio(df_portfolio)
+
+                    # Atualiza os dados históricos se existirem no ficheiro
+                    if res_dados["realized_pl"] > 0:
+                        stats_hist["ganho_realizado"] = round(
+                            res_dados["realized_pl"], 2
                         )
-                    guardar_portfolio(df_portfolio)
+                    if res_dados["divs_total"] > 0:
+                        stats_hist["divs_recebidos"] = round(
+                            res_dados["divs_total"], 2
+                        )
+                    if res_dados["fees_total"] > 0:
+                        stats_hist["custos_transacao"] = round(
+                            res_dados["fees_total"], 2
+                        )
+                    guardar_stats_historico(stats_hist)
+
+                    # Guarda vendas para a aba de IRS
+                    if res_dados["closed_trades"]:
+                        st.session_state["irs_trades"] = res_dados[
+                            "closed_trades"
+                        ]
+
                     st.success(
-                        f"Carregadas {len(df_novo)} posições com sucesso!"
+                        f"Relatório {res_dados['tipo_ficheiro']} processado com sucesso!"
                     )
                     st.cache_data.clear()
                     st.rerun()
 
-    # 2. EDITAR / CORRIGIR ATIVO
+    # 2. ADICIONAR / REFORÇAR ATIVO MANUALMENTE
+    with st.expander("➕ Adicionar / Reforçar Ativo", expanded=False):
+        novo_ticker = (
+            st.text_input("Ticker (ex: AAPL, O, VGWD.DE)")
+            .strip()
+            .upper()
+        )
+        novas_shares = st.number_input(
+            "N.º de Ações / Unidades",
+            min_value=0.0001,
+            value=10.0,
+            step=1.0,
+            key="add_shares",
+        )
+        moeda_compra = st.selectbox(
+            "Moeda da Compra",
+            options=["EUR (€)", "USD ($)"],
+            index=0,
+            key="add_moeda",
+        )
+        novo_custo = st.number_input(
+            "Preço de Compra",
+            min_value=0.01,
+            value=50.0,
+            step=0.5,
+            key="add_custo",
+        )
+
+        if st.button("Guardar Ativo", use_container_width=True):
+            if novo_ticker:
+                t_ajustado = normalizar_ticker(novo_ticker)
+                moeda_registo = "USD" if "USD" in moeda_compra else "EUR"
+
+                if t_ajustado in df_portfolio["Ticker"].values:
+                    idx = df_portfolio[
+                        df_portfolio["Ticker"] == t_ajustado
+                    ].index[0]
+                    qtd_antiga = float(df_portfolio.at[idx, "Shares"])
+                    custo_antigo = float(
+                        df_portfolio.at[idx, "Cost_Per_Share"]
+                    )
+
+                    nova_qtd_total = qtd_antiga + novas_shares
+                    novo_custo_medio = (
+                        (qtd_antiga * custo_antigo)
+                        + (novas_shares * novo_custo)
+                    ) / nova_qtd_total
+
+                    df_portfolio.at[idx, "Shares"] = round(nova_qtd_total, 4)
+                    df_portfolio.at[idx, "Cost_Per_Share"] = round(
+                        novo_custo_medio, 2
+                    )
+                    df_portfolio.at[idx, "Currency"] = moeda_registo
+
+                    guardar_portfolio(df_portfolio)
+                    st.success(
+                        f"Reforço em {t_ajustado}! Novo total: {nova_qtd_total:.2f} ações | Novo PM: {novo_custo_medio:.2f}"
+                    )
+                else:
+                    nova_linha = pd.DataFrame(
+                        [
+                            {
+                                "Ticker": t_ajustado,
+                                "Shares": novas_shares,
+                                "Cost_Per_Share": novo_custo,
+                                "Currency": moeda_registo,
+                            }
+                        ]
+                    )
+                    df_portfolio = pd.concat(
+                        [df_portfolio, nova_linha], ignore_index=True
+                    )
+                    guardar_portfolio(df_portfolio)
+                    st.success(f"{t_ajustado} adicionado!")
+
+                st.cache_data.clear()
+                st.rerun()
+
+    # 3. EDITAR / CORRIGIR ATIVO
     with st.expander("✏️ Editar / Corrigir Ativo", expanded=False):
         if not df_portfolio.empty:
             ticker_para_editar = st.selectbox(
@@ -552,84 +828,6 @@ with st.sidebar:
                 df_portfolio.at[idx_ativo, "Currency"] = moeda_edit
                 guardar_portfolio(df_portfolio)
                 st.success(f"{novo_nome_ticker} atualizado!")
-                st.cache_data.clear()
-                st.rerun()
-
-    # 3. ADICIONAR / REFORÇAR ATIVO MANUALMENTE (Cálculo Ponderado Automático)
-    with st.expander("➕ Adicionar / Reforçar Ativo", expanded=False):
-        novo_ticker = (
-            st.text_input("Ticker (ex: AAPL, O, VGWD.DE)")
-            .strip()
-            .upper()
-        )
-        novas_shares = st.number_input(
-            "N.º de Ações / Unidades",
-            min_value=0.0001,
-            value=10.0,
-            step=1.0,
-            key="add_shares",
-        )
-        moeda_compra = st.selectbox(
-            "Moeda do Preço de Compra",
-            options=["EUR (€)", "USD ($)"],
-            index=0,
-            key="add_moeda",
-        )
-        novo_custo = st.number_input(
-            "Preço de Compra",
-            min_value=0.01,
-            value=50.0,
-            step=0.5,
-            key="add_custo",
-        )
-
-        if st.button("Guardar Ativo", use_container_width=True):
-            if novo_ticker:
-                t_ajustado = normalizar_ticker(novo_ticker)
-                moeda_registo = "USD" if "USD" in moeda_compra else "EUR"
-
-                if t_ajustado in df_portfolio["Ticker"].values:
-                    idx = df_portfolio[
-                        df_portfolio["Ticker"] == t_ajustado
-                    ].index[0]
-                    qtd_antiga = float(df_portfolio.at[idx, "Shares"])
-                    custo_antigo = float(
-                        df_portfolio.at[idx, "Cost_Per_Share"]
-                    )
-
-                    nova_qtd_total = qtd_antiga + novas_shares
-                    novo_custo_medio = (
-                        (qtd_antiga * custo_antigo)
-                        + (novas_shares * novo_custo)
-                    ) / nova_qtd_total
-
-                    df_portfolio.at[idx, "Shares"] = round(nova_qtd_total, 4)
-                    df_portfolio.at[idx, "Cost_Per_Share"] = round(
-                        novo_custo_medio, 2
-                    )
-                    df_portfolio.at[idx, "Currency"] = moeda_registo
-
-                    guardar_portfolio(df_portfolio)
-                    st.success(
-                        f"Reforço adicionado a {t_ajustado}! Novo total: {nova_qtd_total:.2f} ações | Novo Preço Médio: {novo_custo_medio:.2f} {moeda_registo}"
-                    )
-                else:
-                    nova_linha = pd.DataFrame(
-                        [
-                            {
-                                "Ticker": t_ajustado,
-                                "Shares": novas_shares,
-                                "Cost_Per_Share": novo_custo,
-                                "Currency": moeda_registo,
-                            }
-                        ]
-                    )
-                    df_portfolio = pd.concat(
-                        [df_portfolio, nova_linha], ignore_index=True
-                    )
-                    guardar_portfolio(df_portfolio)
-                    st.success(f"{t_ajustado} adicionado!")
-
                 st.cache_data.clear()
                 st.rerun()
 
@@ -806,12 +1004,13 @@ m5.metric(
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-tab_holdings, tab_desempenho, tab_insights, tab_forecast = st.tabs(
+tab_holdings, tab_desempenho, tab_insights, tab_forecast, tab_irs = st.tabs(
     [
         "📊 Holdings",
         "📈 Desempenho",
         "💰 Dividend Insights",
         "🚀 Snowball Forecast",
+        "📑 Fiscal (IRS)",
     ]
 )
 
@@ -896,9 +1095,9 @@ with tab_holdings:
             )
             st.plotly_chart(fig_pie, use_container_width=True)
 
-# TAB 2: Desempenho (Estilo getquin / Parqet)
+# TAB 2: Desempenho (Estilo getquin / Parqet com HTML Seguro)
 with tab_desempenho:
-    col_centro, col_vazia = st.columns([1.15, 1.85])
+    col_centro, col_vazia = st.columns([1.18, 1.82])
 
     with col_centro:
         ganho_preco_eur = total_unrealized_gl
@@ -910,33 +1109,47 @@ with tab_desempenho:
             c_divs_rec = st.number_input(
                 "Dividendos Já Recebidos (€)",
                 min_value=0.0,
-                value=float(round(total_annual_dividend * 0.65, 2)),
+                value=float(stats_hist.get("divs_recebidos", 634.73)),
                 step=10.0,
             )
             c_ganho_realizado = st.number_input(
-                "Ganhos Realizados (Vendas Passadas) (€)",
+                "Ganhos Realizados (Vendas Anteriores) (€)",
                 min_value=0.0,
-                value=1445.11,
+                value=float(stats_hist.get("ganho_realizado", 1445.11)),
                 step=50.0,
             )
             c_custos_transacao = st.number_input(
                 "Custos de Transação / Comissões (€)",
                 min_value=0.0,
-                value=25.39,
+                value=float(stats_hist.get("custos_transacao", 25.39)),
                 step=1.0,
             )
             c_trocas = st.number_input(
                 "Custos de Câmbio / Trocas (€)",
                 min_value=0.0,
-                value=0.0,
+                value=float(stats_hist.get("trocas", 0.0)),
                 step=1.0,
             )
             c_custos_correntes = st.number_input(
-                "Custos Correntes / Ter ETF (€)",
+                "Custos Correntes (€)",
                 min_value=0.0,
-                value=53.95,
+                value=float(stats_hist.get("custos_correntes", 53.95)),
                 step=5.0,
             )
+
+            if st.button("Guardar Parâmetros", use_container_width=True):
+                stats_hist.update(
+                    {
+                        "divs_recebidos": c_divs_rec,
+                        "ganho_realizado": c_ganho_realizado,
+                        "custos_transacao": c_custos_transacao,
+                        "trocas": c_trocas,
+                        "custos_correntes": c_custos_correntes,
+                    }
+                )
+                guardar_stats_historico(stats_hist)
+                st.success("Guardado!")
+                st.rerun()
 
         divs_pct = (
             (c_divs_rec / total_invested) * 100 if total_invested > 0 else 0.0
@@ -957,126 +1170,88 @@ with tab_desempenho:
             else 0.0
         )
 
-        tir_irr = max(0.0, retorno_total_pct * 1.05)
-        twr = max(0.0, retorno_total_pct * 1.15)
+        tir_irr = float(stats_hist.get("tir", 14.92))
+        twr = float(stats_hist.get("twr", 16.47))
 
-        # Mini Gráfico Anual
-        fig_mini = go.Figure()
-        fig_mini.add_trace(
-            go.Bar(
-                x=["2025", "2026"],
-                y=[7.5, 16.5],
-                marker_color=["#00e676", "#00e676"],
-                width=0.35,
-                showlegend=False,
-            )
-        )
-        fig_mini.update_layout(
-            height=140,
-            margin=dict(l=0, r=0, t=10, b=20),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            yaxis=dict(
-                showgrid=True,
-                gridcolor="#2d333b",
-                zeroline=True,
-                zerolinecolor="#444c56",
-                showticklabels=False,
-            ),
-            xaxis=dict(
-                showgrid=False, tickfont=dict(color="#8b949e", size=12)
-            ),
-        )
+        # Renderização HTML sem indentação de código
+        card_html = f"""<div style="background-color: #11141a; border: 1px solid #21262d; border-radius: 12px; padding: 22px; color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 440px;">
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+<div>
+<span style="font-size: 19px; font-weight: 700;">Desempenho</span>
+<span style="background-color: #21262d; color: #8b949e; font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 4px; margin-left: 8px; vertical-align: middle;">PREMIUM</span>
+</div>
+<span style="color: #8b949e; font-size: 13px; cursor: pointer;">Mostrar mais</span>
+</div>
+<div style="display: flex; justify-content: flex-end; align-items: flex-end; height: 110px; margin: 15px 0 25px 0; padding-right: 25px; position: relative;">
+<div style="position: absolute; top: 40px; left: 0; right: 0; border-top: 1px dashed #30363d;"></div>
+<div style="display: flex; flex-direction: column; align-items: center; margin-right: 40px; z-index: 1;">
+<div style="background-color: #00d084; width: 42px; height: 40px; border-radius: 2px 2px 0 0;"></div>
+<div style="background-color: #21262d; width: 42px; height: 30px; border-radius: 0 0 2px 2px; margin-bottom: 8px;"></div>
+<span style="color: #8b949e; font-size: 13px; font-weight: 500;">2025</span>
+</div>
+<div style="display: flex; flex-direction: column; align-items: center; z-index: 1;">
+<div style="background-color: #00d084; width: 42px; height: 70px; border-radius: 2px 2px 0 0;"></div>
+<div style="background-color: #21262d; width: 42px; height: 45px; border-radius: 0 0 2px 2px; margin-bottom: 8px;"></div>
+<span style="color: #8b949e; font-size: 13px; font-weight: 500;">2026</span>
+</div>
+</div>
+<div style="font-size: 16px; font-weight: 700; margin-bottom: 12px;">Capital</div>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 22px; font-size: 14px;">
+<span style="color: #c9d1d9;">Capital investido <span style="font-size: 12px; color: #6b7280;">ⓘ</span></span>
+<span style="font-weight: 700; font-size: 15px;">€ {total_invested:,.2f}</span>
+</div>
+<div style="font-size: 16px; font-weight: 700; margin-bottom: 12px;">Repartição do desempenho</div>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 14px;">
+<span style="color: #c9d1d9;">Ganho de preço <span style="font-size: 12px; color: #6b7280;">ⓘ</span></span>
+<div>
+<span style="color: #00d084; font-weight: 600; margin-right: 14px;">↗ {ganho_preco_pct:.2f}%</span>
+<span style="font-weight: 700;">€ {ganho_preco_eur:,.2f}</span>
+</div>
+</div>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 14px;">
+<span style="color: #c9d1d9;">Dividendos <span style="font-size: 12px; color: #6b7280;">ⓘ</span></span>
+<div>
+<span style="color: #00d084; font-weight: 600; margin-right: 14px;">↗ {divs_pct:.2f}%</span>
+<span style="font-weight: 700;">€ {c_divs_rec:,.2f}</span>
+</div>
+</div>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 22px; font-size: 14px;">
+<span style="color: #c9d1d9;">Ganho realizado <span style="font-size: 12px; color: #6b7280;">ⓘ</span></span>
+<div>
+<span style="color: #00d084; font-weight: 600; margin-right: 14px;">↗ {ganho_real_pct:.2f}%</span>
+<span style="font-weight: 700;">€ {c_ganho_realizado:,.2f}</span>
+</div>
+</div>
+<div style="font-size: 16px; font-weight: 700; margin-bottom: 12px;">Custos de transação</div>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 14px;">
+<span style="color: #c9d1d9;">Custos de transação</span>
+<span style="font-weight: 700;">-€ {c_custos_transacao:,.2f}</span>
+</div>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 14px;">
+<span style="color: #c9d1d9;">Trocas</span>
+<span style="font-weight: 700;">€ {c_trocas:,.2f}</span>
+</div>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; font-size: 14px;">
+<span style="color: #c9d1d9;">Custos correntes <span style="font-size: 12px; color: #6b7280;">ⓘ</span></span>
+<span style="font-weight: 700;">€ {c_custos_correntes:,.2f}</span>
+</div>
+<hr style="border: 0; border-top: 1px solid #21262d; margin-bottom: 18px;">
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-size: 15px;">
+<span style="font-weight: 700;">Retorno total</span>
+<span style="color: #00d084; font-weight: 700; font-size: 16px;">↗ € {retorno_total_eur:,.2f}</span>
+</div>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-size: 14px;">
+<span style="font-weight: 700;">Taxa interna de rendibilidade <span style="font-size: 12px; color: #6b7280;">ⓘ</span></span>
+<span style="color: #00d084; font-weight: 700;">↗ {tir_irr:.2f}%</span>
+</div>
+<div style="display: flex; justify-content: space-between; align-items: center; font-size: 14px;">
+<span style="font-weight: 700;">Taxa de retorno real ponderada pelo tempo <span style="font-size: 12px; color: #6b7280;">ⓘ</span></span>
+<span style="color: #00d084; font-weight: 700;">↗ {twr:.2f}%</span>
+</div>
+</div>"""
 
-        st.markdown(
-            f"""
-        <div style="background-color: #12151c; border: 1px solid #2d333b; border-radius: 12px; padding: 22px; color: #e6edf3; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
-                <div>
-                    <span style="font-size: 19px; font-weight: 700;">Desempenho</span>
-                    <span style="background-color: #21262d; color: #8b949e; font-size: 11px; font-weight: 600; padding: 3px 7px; border-radius: 4px; margin-left: 8px;">PREMIUM</span>
-                </div>
-                <span style="color: #8b949e; font-size: 13px; cursor: pointer;">Mostrar mais</span>
-            </div>
-        """,
-            unsafe_allow_html=True,
-        )
-
-        st.plotly_chart(fig_mini, use_container_width=True)
-
-        st.markdown(
-            f"""
-            <!-- Capital -->
-            <div style="margin-top: 10px;">
-                <span style="font-size: 15px; font-weight: 700;">Capital</span>
-                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
-                    <span style="color: #c9d1d9;">Capital investido ⓘ</span>
-                    <span style="font-weight: 700; font-size: 15px;">€ {total_invested:,.2f}</span>
-                </div>
-            </div>
-
-            <!-- Repartição -->
-            <div style="margin-top: 24px;">
-                <span style="font-size: 15px; font-weight: 700;">Repartição do desempenho</span>
-                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
-                    <span style="color: #c9d1d9;">Ganho de preço ⓘ</span>
-                    <div>
-                        <span style="color: #00e676; margin-right: 14px; font-weight: 600;">↗ {ganho_preco_pct:.2f}%</span>
-                        <span style="font-weight: 600;">€ {ganho_preco_eur:,.2f}</span>
-                    </div>
-                </div>
-                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
-                    <span style="color: #c9d1d9;">Dividendos ⓘ</span>
-                    <div>
-                        <span style="color: #00e676; margin-right: 14px; font-weight: 600;">↗ {divs_pct:.2f}%</span>
-                        <span style="font-weight: 600;">€ {c_divs_rec:,.2f}</span>
-                    </div>
-                </div>
-                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
-                    <span style="color: #c9d1d9;">Ganho realizado ⓘ</span>
-                    <div>
-                        <span style="color: #00e676; margin-right: 14px; font-weight: 600;">↗ {ganho_real_pct:.2f}%</span>
-                        <span style="font-weight: 600;">€ {c_ganho_realizado:,.2f}</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Custos de transação -->
-            <div style="margin-top: 24px;">
-                <span style="font-size: 15px; font-weight: 700;">Custos de transação</span>
-                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
-                    <span style="color: #c9d1d9;">Custos de transação</span>
-                    <span style="font-weight: 600;">-€ {c_custos_transacao:,.2f}</span>
-                </div>
-                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
-                    <span style="color: #c9d1d9;">Trocas</span>
-                    <span style="font-weight: 600;">€ {c_trocas:,.2f}</span>
-                </div>
-                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
-                    <span style="color: #c9d1d9;">Custos correntes ⓘ</span>
-                    <span style="font-weight: 600;">€ {c_custos_correntes:,.2f}</span>
-                </div>
-            </div>
-
-            <div style="border-top: 1px solid #21262d; margin: 24px 0 16px 0;"></div>
-
-            <!-- Totais Finais -->
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                <span style="font-size: 16px; font-weight: 700;">Retorno total</span>
-                <span style="color: #00e676; font-size: 18px; font-weight: 700;">↗ € {retorno_total_eur:,.2f}</span>
-            </div>
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 14px;">
-                <span style="color: #c9d1d9; font-weight: 600;">Taxa interna de rendibilidade ⓘ</span>
-                <span style="color: #00e676; font-weight: 600;">↗ {tir_irr:.2f}%</span>
-            </div>
-            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 14px;">
-                <span style="color: #c9d1d9; font-weight: 600;">Taxa de retorno real ponderada pelo tempo ⓘ</span>
-                <span style="color: #00e676; font-weight: 600;">↗ {twr:.2f}%</span>
-            </div>
-        </div>
-        """,
-            unsafe_allow_html=True,
-        )
+        clean_render = "".join(line.strip() for line in card_html.splitlines())
+        st.markdown(clean_render, unsafe_allow_html=True)
 
 # TAB 3: Dividend Insights
 with tab_insights:
@@ -1260,4 +1435,60 @@ with tab_forecast:
             f"💡 Em **{anos} anos**, o teu portfólio está projetado para atingir **{proj_valor[-1]:,.2f} {MOEDA_BASE}**, "
             f"gerando um rendimento anual em dividendos de **{proj_dividendos[-1]:,.2f} {MOEDA_BASE}** "
             f"(~**{proj_dividendos[-1]/12:,.2f} {MOEDA_BASE} por mês**)."
+        )
+
+# TAB 5: Fiscal (IRS Anexo J & Anexo G)
+with tab_irs:
+    st.subheader("📑 Apuramento de Mais-Valias para o IRS")
+    st.caption(
+        "Discriminação automática das vendas executadas para preenchimento do **Anexo J (Quadro 9.2A)** e **Anexo G**."
+    )
+
+    lista_vendas = st.session_state.get("irs_trades", [])
+
+    if lista_vendas:
+        df_irs = pd.DataFrame(lista_vendas)
+
+        c_vendas, c_lucro = st.columns(2)
+        total_vendas_eur = df_irs["Valor Venda (€)"].sum()
+        total_pl_irs = df_irs["Mais/Menos-valia (€)"].sum()
+
+        c_vendas.metric("Total Alienado", f"{total_vendas_eur:,.2f} €")
+        c_lucro.metric(
+            "Saldo de Mais-Valias Líquidas",
+            f"{total_pl_irs:+,.2f} €",
+            delta=f"{len(df_irs)} operações realizadas",
+        )
+
+        st.dataframe(
+            df_irs.style.format(
+                {
+                    "Valor Venda (€)": "{:,.2f} €",
+                    "Valor Compra (€)": "{:,.2f} €",
+                    "Mais/Menos-valia (€)": "{:+,.2f} €",
+                }
+            ).map(
+                lambda v: (
+                    "color: #00e676;"
+                    if v > 0
+                    else "color: #ff5252;"
+                    if v < 0
+                    else ""
+                ),
+                subset=["Mais/Menos-valia (€)"],
+            ),
+            use_container_width=True,
+            height=380,
+        )
+
+        csv_irs = df_irs.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Descarregar Tabela para Apoio ao IRS (CSV)",
+            data=csv_irs,
+            file_name="apuramento_mais_valias_irs.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info(
+            "Carrega o teu ficheiro da **XTB (`.xlsx`)** ou da **Trading 212 (`.csv`)** na barra lateral para carregar automaticamente o histórico de vendas para o IRS."
         )
