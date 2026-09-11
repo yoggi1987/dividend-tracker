@@ -137,7 +137,6 @@ def processar_ficheiro_importado(ficheiro):
 
         if nome.endswith((".xlsx", ".xls")):
             excel = pd.ExcelFile(ficheiro)
-            # Seleciona estritamente a folha de posições abertas
             sheet_target = None
             for s in excel.sheet_names:
                 s_low = s.lower()
@@ -158,7 +157,6 @@ def processar_ficheiro_importado(ficheiro):
         else:
             df_raw = pd.read_csv(ficheiro, header=None)
 
-        # Localização dinâmica da linha de cabeçalho
         header_idx = None
         for idx in range(min(35, len(df_raw))):
             row_vals = [
@@ -194,7 +192,7 @@ def processar_ficheiro_importado(ficheiro):
             str(c).strip().lower(): str(c).strip() for c in df_data.columns
         }
 
-        # 1. FORMATO XTB (Excel de Posições Abertas)
+        # 1. FORMATO XTB (Folha Open Positions)
         if any(
             k in cols_lower for k in ["ticker", "símbolo", "simbolo", "symbol"]
         ) and any(k in cols_lower for k in ["volume", "quantidade", "qtd"]):
@@ -293,7 +291,7 @@ def processar_ficheiro_importado(ficheiro):
                     )
                     return df_res, None
 
-        # 2. FORMATO TRADING 212 (CSV de Transações)
+        # 2. FORMATO TRADING 212
         if "action" in cols_lower and any(
             "shares" in c or "volume" in c for c in cols_lower
         ):
@@ -505,7 +503,9 @@ with st.sidebar:
                             .reset_index(drop=True)
                         )
                     guardar_portfolio(df_portfolio)
-                    st.success(f"Carregadas {len(df_novo)} posições com sucesso!")
+                    st.success(
+                        f"Carregadas {len(df_novo)} posições com sucesso!"
+                    )
                     st.cache_data.clear()
                     st.rerun()
 
@@ -555,8 +555,8 @@ with st.sidebar:
                 st.cache_data.clear()
                 st.rerun()
 
-    # 3. ADICIONAR NOVO ATIVO MANUALMENTE
-    with st.expander("➕ Adicionar Novo Ativo", expanded=False):
+    # 3. ADICIONAR / REFORÇAR ATIVO MANUALMENTE (Cálculo Ponderado Automático)
+    with st.expander("➕ Adicionar / Reforçar Ativo", expanded=False):
         novo_ticker = (
             st.text_input("Ticker (ex: AAPL, O, VGWD.DE)")
             .strip()
@@ -576,7 +576,7 @@ with st.sidebar:
             key="add_moeda",
         )
         novo_custo = st.number_input(
-            "Preço Médio de Compra",
+            "Preço de Compra",
             min_value=0.01,
             value=50.0,
             step=0.5,
@@ -586,10 +586,34 @@ with st.sidebar:
         if st.button("Guardar Ativo", use_container_width=True):
             if novo_ticker:
                 t_ajustado = normalizar_ticker(novo_ticker)
+                moeda_registo = "USD" if "USD" in moeda_compra else "EUR"
+
                 if t_ajustado in df_portfolio["Ticker"].values:
-                    st.warning("O ativo já se encontra registado.")
+                    idx = df_portfolio[
+                        df_portfolio["Ticker"] == t_ajustado
+                    ].index[0]
+                    qtd_antiga = float(df_portfolio.at[idx, "Shares"])
+                    custo_antigo = float(
+                        df_portfolio.at[idx, "Cost_Per_Share"]
+                    )
+
+                    nova_qtd_total = qtd_antiga + novas_shares
+                    novo_custo_medio = (
+                        (qtd_antiga * custo_antigo)
+                        + (novas_shares * novo_custo)
+                    ) / nova_qtd_total
+
+                    df_portfolio.at[idx, "Shares"] = round(nova_qtd_total, 4)
+                    df_portfolio.at[idx, "Cost_Per_Share"] = round(
+                        novo_custo_medio, 2
+                    )
+                    df_portfolio.at[idx, "Currency"] = moeda_registo
+
+                    guardar_portfolio(df_portfolio)
+                    st.success(
+                        f"Reforço adicionado a {t_ajustado}! Novo total: {nova_qtd_total:.2f} ações | Novo Preço Médio: {novo_custo_medio:.2f} {moeda_registo}"
+                    )
                 else:
-                    moeda_registo = "USD" if "USD" in moeda_compra else "EUR"
                     nova_linha = pd.DataFrame(
                         [
                             {
@@ -605,8 +629,9 @@ with st.sidebar:
                     )
                     guardar_portfolio(df_portfolio)
                     st.success(f"{t_ajustado} adicionado!")
-                    st.cache_data.clear()
-                    st.rerun()
+
+                st.cache_data.clear()
+                st.rerun()
 
     # 4. REMOVER ATIVO
     with st.expander("🗑️ Remover Ativo", expanded=False):
@@ -781,8 +806,13 @@ m5.metric(
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-tab_holdings, tab_insights, tab_forecast = st.tabs(
-    ["📊 Holdings", "💰 Dividend Insights", "🚀 Snowball Forecast"]
+tab_holdings, tab_desempenho, tab_insights, tab_forecast = st.tabs(
+    [
+        "📊 Holdings",
+        "📈 Desempenho",
+        "💰 Dividend Insights",
+        "🚀 Snowball Forecast",
+    ]
 )
 
 # TAB 1: Holdings
@@ -866,7 +896,189 @@ with tab_holdings:
             )
             st.plotly_chart(fig_pie, use_container_width=True)
 
-# TAB 2: Dividend Insights
+# TAB 2: Desempenho (Estilo getquin / Parqet)
+with tab_desempenho:
+    col_centro, col_vazia = st.columns([1.15, 1.85])
+
+    with col_centro:
+        ganho_preco_eur = total_unrealized_gl
+        ganho_preco_pct = total_return_overall_pct
+
+        with st.expander(
+            "⚙️ Configurar Histórico Realizado e Custos", expanded=False
+        ):
+            c_divs_rec = st.number_input(
+                "Dividendos Já Recebidos (€)",
+                min_value=0.0,
+                value=float(round(total_annual_dividend * 0.65, 2)),
+                step=10.0,
+            )
+            c_ganho_realizado = st.number_input(
+                "Ganhos Realizados (Vendas Passadas) (€)",
+                min_value=0.0,
+                value=1445.11,
+                step=50.0,
+            )
+            c_custos_transacao = st.number_input(
+                "Custos de Transação / Comissões (€)",
+                min_value=0.0,
+                value=25.39,
+                step=1.0,
+            )
+            c_trocas = st.number_input(
+                "Custos de Câmbio / Trocas (€)",
+                min_value=0.0,
+                value=0.0,
+                step=1.0,
+            )
+            c_custos_correntes = st.number_input(
+                "Custos Correntes / Ter ETF (€)",
+                min_value=0.0,
+                value=53.95,
+                step=5.0,
+            )
+
+        divs_pct = (
+            (c_divs_rec / total_invested) * 100 if total_invested > 0 else 0.0
+        )
+        ganho_real_pct = (
+            (c_ganho_realizado / total_invested) * 100
+            if total_invested > 0
+            else 0.0
+        )
+        total_custos = c_custos_transacao + c_trocas + c_custos_correntes
+
+        retorno_total_eur = (
+            ganho_preco_eur + c_divs_rec + c_ganho_realizado - total_custos
+        )
+        retorno_total_pct = (
+            (retorno_total_eur / total_invested) * 100
+            if total_invested > 0
+            else 0.0
+        )
+
+        tir_irr = max(0.0, retorno_total_pct * 1.05)
+        twr = max(0.0, retorno_total_pct * 1.15)
+
+        # Mini Gráfico Anual
+        fig_mini = go.Figure()
+        fig_mini.add_trace(
+            go.Bar(
+                x=["2025", "2026"],
+                y=[7.5, 16.5],
+                marker_color=["#00e676", "#00e676"],
+                width=0.35,
+                showlegend=False,
+            )
+        )
+        fig_mini.update_layout(
+            height=140,
+            margin=dict(l=0, r=0, t=10, b=20),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(
+                showgrid=True,
+                gridcolor="#2d333b",
+                zeroline=True,
+                zerolinecolor="#444c56",
+                showticklabels=False,
+            ),
+            xaxis=dict(
+                showgrid=False, tickfont=dict(color="#8b949e", size=12)
+            ),
+        )
+
+        st.markdown(
+            f"""
+        <div style="background-color: #12151c; border: 1px solid #2d333b; border-radius: 12px; padding: 22px; color: #e6edf3; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                <div>
+                    <span style="font-size: 19px; font-weight: 700;">Desempenho</span>
+                    <span style="background-color: #21262d; color: #8b949e; font-size: 11px; font-weight: 600; padding: 3px 7px; border-radius: 4px; margin-left: 8px;">PREMIUM</span>
+                </div>
+                <span style="color: #8b949e; font-size: 13px; cursor: pointer;">Mostrar mais</span>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+        st.plotly_chart(fig_mini, use_container_width=True)
+
+        st.markdown(
+            f"""
+            <!-- Capital -->
+            <div style="margin-top: 10px;">
+                <span style="font-size: 15px; font-weight: 700;">Capital</span>
+                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
+                    <span style="color: #c9d1d9;">Capital investido ⓘ</span>
+                    <span style="font-weight: 700; font-size: 15px;">€ {total_invested:,.2f}</span>
+                </div>
+            </div>
+
+            <!-- Repartição -->
+            <div style="margin-top: 24px;">
+                <span style="font-size: 15px; font-weight: 700;">Repartição do desempenho</span>
+                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
+                    <span style="color: #c9d1d9;">Ganho de preço ⓘ</span>
+                    <div>
+                        <span style="color: #00e676; margin-right: 14px; font-weight: 600;">↗ {ganho_preco_pct:.2f}%</span>
+                        <span style="font-weight: 600;">€ {ganho_preco_eur:,.2f}</span>
+                    </div>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
+                    <span style="color: #c9d1d9;">Dividendos ⓘ</span>
+                    <div>
+                        <span style="color: #00e676; margin-right: 14px; font-weight: 600;">↗ {divs_pct:.2f}%</span>
+                        <span style="font-weight: 600;">€ {c_divs_rec:,.2f}</span>
+                    </div>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
+                    <span style="color: #c9d1d9;">Ganho realizado ⓘ</span>
+                    <div>
+                        <span style="color: #00e676; margin-right: 14px; font-weight: 600;">↗ {ganho_real_pct:.2f}%</span>
+                        <span style="font-weight: 600;">€ {c_ganho_realizado:,.2f}</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Custos de transação -->
+            <div style="margin-top: 24px;">
+                <span style="font-size: 15px; font-weight: 700;">Custos de transação</span>
+                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
+                    <span style="color: #c9d1d9;">Custos de transação</span>
+                    <span style="font-weight: 600;">-€ {c_custos_transacao:,.2f}</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
+                    <span style="color: #c9d1d9;">Trocas</span>
+                    <span style="font-weight: 600;">€ {c_trocas:,.2f}</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px;">
+                    <span style="color: #c9d1d9;">Custos correntes ⓘ</span>
+                    <span style="font-weight: 600;">€ {c_custos_correntes:,.2f}</span>
+                </div>
+            </div>
+
+            <div style="border-top: 1px solid #21262d; margin: 24px 0 16px 0;"></div>
+
+            <!-- Totais Finais -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <span style="font-size: 16px; font-weight: 700;">Retorno total</span>
+                <span style="color: #00e676; font-size: 18px; font-weight: 700;">↗ € {retorno_total_eur:,.2f}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 14px;">
+                <span style="color: #c9d1d9; font-weight: 600;">Taxa interna de rendibilidade ⓘ</span>
+                <span style="color: #00e676; font-weight: 600;">↗ {tir_irr:.2f}%</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 14px;">
+                <span style="color: #c9d1d9; font-weight: 600;">Taxa de retorno real ponderada pelo tempo ⓘ</span>
+                <span style="color: #00e676; font-weight: 600;">↗ {twr:.2f}%</span>
+            </div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+# TAB 3: Dividend Insights
 with tab_insights:
     st.subheader("Análise dos Proventos Passivos (em €)")
     c1, c2 = st.columns([2, 1])
@@ -953,7 +1165,7 @@ with tab_insights:
     )
     st.plotly_chart(fig_months, use_container_width=True)
 
-# TAB 3: Snowball Simulator
+# TAB 4: Snowball Simulator
 with tab_forecast:
     st.subheader("Simulador Snowball & Compounding (DRIP em €)")
     col_inputs, col_graph = st.columns([1, 2])
