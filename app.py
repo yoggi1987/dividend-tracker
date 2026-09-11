@@ -20,6 +20,22 @@ st.set_page_config(
 MOEDA_BASE = "€"
 CSV_FILE = "portfolio.csv"
 
+# Dicionário de conversão automática para extratos da Trading 212
+MAPA_TICKERS_EUROPA = {
+    "FUSD": "FUSD.DE",
+    "IDVY": "IDVY.AS",
+    "VGWD": "VGWD.DE",
+    "VHYL": "VHYL.AS",
+    "IQQE": "IQQE.DE",
+    "VWCE": "VWCE.DE",
+    "QDVE": "QDVE.DE",
+    "VUAA": "VUAA.DE",
+    "SXR8": "SXR8.DE",
+    "IS3N": "IS3N.DE",
+    "EUNL": "EUNL.DE",
+    "VUSA": "VUSA.AS",
+}
+
 st.markdown(
     """
     <style>
@@ -41,7 +57,6 @@ st.markdown(
 # ---------------------------------------------------------
 def carregar_portfolio():
     if not os.path.exists(CSV_FILE):
-        # Carteira inicial padrão
         dados_iniciais = pd.DataFrame(
             [
                 {
@@ -58,20 +73,20 @@ def carregar_portfolio():
                 },
                 {
                     "Ticker": "FUSD.DE",
-                    "Shares": 1281.0,
+                    "Shares": 1282.0,
                     "Cost_Per_Share": 11.81,
                     "Currency": "EUR",
                 },
                 {
                     "Ticker": "IDVY.AS",
-                    "Shares": 368.03,
+                    "Shares": 368.04,
                     "Cost_Per_Share": 25.47,
                     "Currency": "EUR",
                 },
                 {
                     "Ticker": "VICI",
                     "Shares": 7.0,
-                    "Cost_Per_Share": 22.03,
+                    "Cost_Per_Share": 22.01,
                     "Currency": "USD",
                 },
             ]
@@ -103,7 +118,7 @@ def obter_taxa_eur_usd():
 
 
 # ---------------------------------------------------------
-# Motor de Processamento de CSV (Trading 212 & Genérico)
+# Motor de Processamento de CSV
 # ---------------------------------------------------------
 def processar_csv_importado(ficheiro_carregado):
     try:
@@ -111,7 +126,7 @@ def processar_csv_importado(ficheiro_carregado):
         colunas = [c.strip() for c in df_raw.columns]
         df_raw.columns = colunas
 
-        # Formato 1: Extrato Oficial da Trading 212
+        # Formato Oficial Trading 212
         if "Action" in colunas and (
             "No. of shares" in colunas or "Shares" in colunas
         ):
@@ -135,7 +150,13 @@ def processar_csv_importado(ficheiro_carregado):
 
             for _, row in df_raw.iterrows():
                 acao = str(row["Action"]).lower()
-                ticker = str(row[col_ticker]).strip().upper()
+                ticker_original = str(row[col_ticker]).strip().upper()
+
+                # Aplica o mapa para ETFs europeus conhecidos
+                ticker = MAPA_TICKERS_EUROPA.get(
+                    ticker_original, ticker_original
+                )
+
                 qtd = float(row[col_shares]) if pd.notnull(row[col_shares]) else 0.0
                 preco = (
                     float(row[col_price]) if pd.notnull(row[col_price]) else 0.0
@@ -183,7 +204,7 @@ def processar_csv_importado(ficheiro_carregado):
                     )
             return pd.DataFrame(linhas), None
 
-        # Formato 2: Ficheiro Padrão (Ticker, Shares, Cost_Per_Share, [Currency])
+        # Formato Padrão (Ticker, Shares, Cost_Per_Share, Currency)
         ticker_col = next(
             (c for c in colunas if c.lower() in ["ticker", "symbol", "ativo"]),
             None,
@@ -217,7 +238,13 @@ def processar_csv_importado(ficheiro_carregado):
 
         if ticker_col and shares_col and cost_col:
             df_res = pd.DataFrame()
-            df_res["Ticker"] = df_raw[ticker_col].astype(str).str.strip().str.upper()
+            df_res["Ticker"] = (
+                df_raw[ticker_col]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .apply(lambda x: MAPA_TICKERS_EUROPA.get(x, x))
+            )
             df_res["Shares"] = pd.to_numeric(df_raw[shares_col], errors="coerce").fillna(0.0)
             df_res["Cost_Per_Share"] = pd.to_numeric(df_raw[cost_col], errors="coerce").fillna(0.0)
             if curr_col:
@@ -233,11 +260,11 @@ def processar_csv_importado(ficheiro_carregado):
 
         return (
             None,
-            "Formato não reconhecido. Certifica-te de que o ficheiro tem colunas válidas.",
+            "Formato não reconhecido. Confirma os nomes das colunas no ficheiro.",
         )
 
     except Exception as e:
-        return None, f"Erro ao ler CSV: {str(e)}"
+        return None, f"Erro ao processar ficheiro: {str(e)}"
 
 
 # ---------------------------------------------------------
@@ -340,25 +367,114 @@ with st.sidebar:
     st.header("⚙️ Gestor de Carteira")
     st.caption(f"💱 Câmbio atual: **1 EUR = {taxa_eur_usd:.4f} USD**")
 
-    # 1. IMPORTAR CSV (DISPONÍVEL AQUI)
-    with st.expander("📥 Importar Ficheiro CSV", expanded=False):
-        st.write("Suporta **extratos da Trading 212** ou ficheiro modelo.")
+    # 1. EDITAR / CORRIGIR ATIVO EXISTENTE
+    with st.expander("✏️ Editar / Corrigir Ativo", expanded=True):
+        if not df_portfolio.empty:
+            ticker_para_editar = st.selectbox(
+                "Seleciona a posição:", options=df_portfolio["Ticker"].tolist()
+            )
+            idx_ativo = df_portfolio[
+                df_portfolio["Ticker"] == ticker_para_editar
+            ].index[0]
+            linha_atual = df_portfolio.loc[idx_ativo]
 
-        modelo_csv = "Ticker,Shares,Cost_Per_Share,Currency\nVGWD.DE,195.0,77.06,EUR\nFUSD.DE,1281.0,11.81,EUR\nVICI,7.0,22.03,USD\n"
-        st.download_button(
-            label="📄 Descarregar Modelo CSV",
-            data=modelo_csv,
-            file_name="modelo_carteira.csv",
-            mime="text/csv",
-            use_container_width=True,
+            novo_nome_ticker = (
+                st.text_input("Ticker", value=str(linha_atual["Ticker"]))
+                .strip()
+                .upper()
+            )
+            novas_shares_edit = st.number_input(
+                "N.º de Ações",
+                min_value=0.0001,
+                value=float(linha_atual["Shares"]),
+                step=1.0,
+            )
+            novo_custo_edit = st.number_input(
+                "Preço Médio de Compra",
+                min_value=0.01,
+                value=float(linha_atual["Cost_Per_Share"]),
+                step=0.1,
+            )
+            moeda_edit = st.selectbox(
+                "Moeda do Preço Médio",
+                options=["EUR", "USD"],
+                index=0
+                if str(linha_atual.get("Currency", "EUR")) == "EUR"
+                else 1,
+            )
+
+            if st.button("Atualizar Posição", use_container_width=True):
+                df_portfolio.at[idx_ativo, "Ticker"] = novo_nome_ticker
+                df_portfolio.at[idx_ativo, "Shares"] = novas_shares_edit
+                df_portfolio.at[idx_ativo, "Cost_Per_Share"] = novo_custo_edit
+                df_portfolio.at[idx_ativo, "Currency"] = moeda_edit
+                guardar_portfolio(df_portfolio)
+                st.success(f"{novo_nome_ticker} atualizado com sucesso!")
+                st.cache_data.clear()
+                st.rerun()
+
+    # 2. ADICIONAR MANUALMENTE
+    with st.expander("➕ Adicionar Novo Ativo", expanded=False):
+        novo_ticker = (
+            st.text_input("Ticker (ex: AAPL, O, VGWD.DE)")
+            .strip()
+            .upper()
+        )
+        novas_shares = st.number_input(
+            "N.º de Ações / Unidades",
+            min_value=0.0001,
+            value=10.0,
+            step=1.0,
+            key="add_shares",
+        )
+        moeda_compra = st.selectbox(
+            "Moeda do Preço de Compra",
+            options=["EUR (€)", "USD ($)"],
+            index=0,
+            key="add_moeda",
+        )
+        novo_custo = st.number_input(
+            "Preço Médio de Compra",
+            min_value=0.01,
+            value=50.0,
+            step=0.5,
+            key="add_custo",
         )
 
+        if st.button("Guardar Ativo", use_container_width=True):
+            if novo_ticker:
+                t_ajustado = MAPA_TICKERS_EUROPA.get(novo_ticker, novo_ticker)
+                if t_ajustado in df_portfolio["Ticker"].values:
+                    st.warning("O ativo já se encontra registado.")
+                else:
+                    moeda_registo = "USD" if "USD" in moeda_compra else "EUR"
+                    nova_linha = pd.DataFrame(
+                        [
+                            {
+                                "Ticker": t_ajustado,
+                                "Shares": novas_shares,
+                                "Cost_Per_Share": novo_custo,
+                                "Currency": moeda_registo,
+                            }
+                        ]
+                    )
+                    df_portfolio = pd.concat(
+                        [df_portfolio, nova_linha], ignore_index=True
+                    )
+                    guardar_portfolio(df_portfolio)
+                    st.success(f"{t_ajustado} adicionado!")
+                    st.cache_data.clear()
+                    st.rerun()
+
+    # 3. IMPORTAR CSV
+    with st.expander("📥 Importar Ficheiro CSV", expanded=False):
+        st.write("Suporta extratos da **Trading 212**.")
         uploaded_file = st.file_uploader(
-            "Seleciona o ficheiro CSV", type=["csv"], key="csv_uploader"
+            "Ficheiro CSV", type=["csv"], key="csv_up"
         )
         tipo_import = st.radio(
-            "Método de Importação:",
-            options=["Substituir Carteira", "Fundir / Adicionar"],
+            "Método:",
+            ["Fundir / Adicionar", "Substituir Carteira"],
             index=0,
         )
 
@@ -377,58 +493,17 @@ with st.sidebar:
                             .reset_index(drop=True)
                         )
                     guardar_portfolio(df_portfolio)
-                    st.success(
-                        f"Importados com sucesso {len(df_novo)} ativos!"
-                    )
+                    st.success(f"Carregadas {len(df_novo)} posições!")
                     st.cache_data.clear()
                     st.rerun()
 
-    # 2. ADICIONAR MANUALMENTE
-    with st.expander("➕ Adicionar Manualmente", expanded=False):
-        novo_ticker = (
-            st.text_input("Ticker (ex: AAPL, O, VGWD.DE)")
-            .strip()
-            .upper()
-        )
-        novas_shares = st.number_input(
-            "N.º de Ações / Unidades", min_value=0.0001, value=10.0, step=1.0
-        )
-        moeda_compra = st.selectbox(
-            "Moeda do Preço de Compra", options=["EUR (€)", "USD ($)"], index=0
-        )
-        novo_custo = st.number_input(
-            "Preço Médio de Compra", min_value=0.01, value=50.0, step=0.5
-        )
-
-        if st.button("Guardar Ativo", use_container_width=True):
-            if novo_ticker:
-                if novo_ticker in df_portfolio["Ticker"].values:
-                    st.warning("O ativo já se encontra registado.")
-                else:
-                    moeda_registo = "USD" if "USD" in moeda_compra else "EUR"
-                    nova_linha = pd.DataFrame(
-                        [
-                            {
-                                "Ticker": novo_ticker,
-                                "Shares": novas_shares,
-                                "Cost_Per_Share": novo_custo,
-                                "Currency": moeda_registo,
-                            }
-                        ]
-                    )
-                    df_portfolio = pd.concat(
-                        [df_portfolio, nova_linha], ignore_index=True
-                    )
-                    guardar_portfolio(df_portfolio)
-                    st.success(f"{novo_ticker} adicionado!")
-                    st.cache_data.clear()
-                    st.rerun()
-
-    # 3. REMOVER ATIVO
+    # 4. REMOVER ATIVO
     with st.expander("🗑️ Remover Ativo", expanded=False):
         if not df_portfolio.empty:
             ticker_remover = st.selectbox(
-                "Seleciona o Ticker", options=df_portfolio["Ticker"].tolist()
+                "Seleciona para eliminar",
+                options=df_portfolio["Ticker"].tolist(),
+                key="del_sel",
             )
             if st.button(
                 "Eliminar da Carteira",
