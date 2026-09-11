@@ -19,6 +19,8 @@ st.set_page_config(
 
 MOEDA_BASE = "€"
 CSV_FILE = "portfolio.csv"
+TRADES_FILE = "closed_trades.csv"
+DIVS_FILE = "dividends.csv"
 HIST_FILE = "history_stats.csv"
 
 MAPA_TICKERS_EUROPA = {
@@ -48,6 +50,7 @@ MAPA_PAISES_IRS = {
     "JP": "392 - Japão",
     "CN": "156 - China",
     "PT": "620 - Portugal",
+    "DK": "208 - Dinamarca",
 }
 
 st.markdown(
@@ -67,7 +70,7 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# Gestão de Estado e Ficheiros Locais
+# Gestão de Ficheiros Locais e Persistência
 # ---------------------------------------------------------
 def carregar_portfolio():
     if not os.path.exists(CSV_FILE):
@@ -118,10 +121,70 @@ def guardar_portfolio(df):
     df.to_csv(CSV_FILE, index=False)
 
 
+def carregar_vendas_fechadas():
+    if os.path.exists(TRADES_FILE):
+        try:
+            return pd.read_csv(TRADES_FILE)
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+
+def guardar_vendas_fechadas(df_novas):
+    df_existente = carregar_vendas_fechadas()
+    if df_existente.empty:
+        df_final = df_novas
+    else:
+        df_final = pd.concat(
+            [df_existente, df_novas], ignore_index=True
+        ).drop_duplicates(
+            subset=[
+                "Corretora",
+                "Ticker",
+                "Data Venda",
+                "Valor Venda (€)",
+                "Valor Compra (€)",
+            ],
+            keep="last",
+        )
+    df_final.to_csv(TRADES_FILE, index=False)
+    return df_final
+
+
+def carregar_dividendos():
+    if os.path.exists(DIVS_FILE):
+        try:
+            return pd.read_csv(DIVS_FILE)
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+
+def guardar_dividendos(df_novos):
+    df_existente = carregar_dividendos()
+    if df_existente.empty:
+        df_final = df_novos
+    else:
+        df_final = pd.concat(
+            [df_existente, df_novos], ignore_index=True
+        ).drop_duplicates(
+            subset=[
+                "Corretora",
+                "Ticker",
+                "Data",
+                "Valor_Bruto",
+                "Valor_Liquido",
+            ],
+            keep="last",
+        )
+    df_final.to_csv(DIVS_FILE, index=False)
+    return df_final
+
+
 def carregar_stats_historico():
     default_stats = {
-        "divs_recebidos": 634.73,
-        "ganho_realizado": 1445.11,
+        "divs_recebidos": 524.68,
+        "ganho_realizado": 1602.89,
         "custos_transacao": 25.39,
         "trocas": 0.00,
         "custos_correntes": 53.95,
@@ -155,7 +218,7 @@ def obter_taxa_eur_usd():
 
 
 # ---------------------------------------------------------
-# Motor de Leitura de Extratos (XTB Excel & T212 CSV)
+# Motor de Leitura e Unificação de Extratos
 # ---------------------------------------------------------
 def normalizar_ticker(t_raw):
     t = str(t_raw).strip().upper()
@@ -175,18 +238,20 @@ def processar_ficheiro_importado(ficheiro):
         dados_apuramento = {
             "holdings": pd.DataFrame(),
             "closed_trades": [],
-            "divs_total": 0.0,
+            "dividend_records": [],
+            "divs_total_liquido": 0.0,
+            "divs_total_bruto": 0.0,
             "realized_pl": 0.0,
             "fees_total": 0.0,
             "tipo_ficheiro": "",
         }
 
-        # CASO 1: RELATÓRIO EXCEL DA XTB (.XLSX)
+        # CASO 1: RELATÓRIO EXCEL XTB (.XLSX)
         if nome.endswith((".xlsx", ".xls")):
             dados_apuramento["tipo_ficheiro"] = "XTB"
             excel = pd.ExcelFile(ficheiro)
 
-            # 1. Posições Abertas (Holdings)
+            # 1. Holdings Abertas
             open_sheet = next(
                 (
                     s
@@ -292,7 +357,7 @@ def processar_ficheiro_importado(ficheiro):
                             .reset_index()
                         )
 
-            # 2. Posições Fechadas (Ganhos Realizados e IRS)
+            # 2. Posições Fechadas (Vendas e IRS)
             closed_sheet = next(
                 (
                     s
@@ -384,7 +449,7 @@ def processar_ficheiro_importado(ficheiro):
                             }
                         )
 
-            # 3. Dividendos e Custos de Caixa
+            # 3. Operações de Caixa (Dividendos e Retenções)
             cash_sheet = next(
                 (
                     s
@@ -415,31 +480,87 @@ def processar_ficheiro_importado(ficheiro):
                     df_cash["Amount"] = pd.to_numeric(
                         df_cash["Amount"], errors="coerce"
                     )
-                    for _, row in df_cash.iterrows():
-                        tp = str(row.get("Type", "")).strip().lower()
-                        amt = float(row.get("Amount", 0.0))
-                        if "dividend" in tp:
-                            dados_apuramento["divs_total"] += amt
+
+                    sub_div = df_cash[
+                        df_cash["Type"].isin(["Dividend", "Withholding tax"])
+                    ].copy()
+                    sub_div["Date_Only"] = pd.to_datetime(
+                        sub_div["Time"], errors="coerce"
+                    ).dt.date
+
+                    for (d, t), grp in sub_div.groupby(["Date_Only", "Ticker"]):
+                        g_val = grp[grp["Type"] == "Dividend"]["Amount"].sum()
+                        w_val = abs(
+                            grp[grp["Type"] == "Withholding tax"]["Amount"].sum()
+                        )
+                        if g_val > 0:
+                            n_val = g_val - w_val
+                            dados_apuramento["divs_total_bruto"] += g_val
+                            dados_apuramento["divs_total_liquido"] += n_val
+                            dados_apuramento["dividend_records"].append(
+                                {
+                                    "Data": str(d),
+                                    "Ano_Mes": str(d)[:7],
+                                    "Corretora": "XTB",
+                                    "Ticker": str(t),
+                                    "Nome": str(t),
+                                    "País": "840 - Estados Unidos"
+                                    if "US" in str(t)
+                                    else "372 - Irlanda",
+                                    "Valor_Bruto": round(g_val, 2),
+                                    "Retencao_Fonte": round(w_val, 2),
+                                    "Valor_Liquido": round(n_val, 2),
+                                }
+                            )
 
             return dados_apuramento, None
 
         # CASO 2: EXTRATO CSV DA TRADING 212
         else:
             dados_apuramento["tipo_ficheiro"] = "Trading 212"
-            df_raw = pd.read_csv(ficheiro)
+            df_raw = pd.read_csv(ficheiro, encoding="utf-8-sig")
             df_raw.columns = [str(c).strip() for c in df_raw.columns]
 
-            # Dividendos
+            # 1. Dividendos com discriminação Bruto e Retenção
             divs = df_raw[
                 df_raw["Action"]
                 .astype(str)
                 .str.contains("Dividend", case=False, na=False)
-            ]
-            dados_apuramento["divs_total"] = float(
-                pd.to_numeric(divs["Total"], errors="coerce").sum()
-            )
+            ].copy()
+            for _, r in divs.iterrows():
+                dt = pd.to_datetime(r.get("Time (UTC)"), errors="coerce")
+                net = float(r.get("Total", 0.0))
+                wht = float(r.get("Withholding tax", 0.0))
+                gross = net + wht
 
-            # Taxas e custos de conversão
+                isin = str(r.get("ISIN", ""))
+                c_code = isin[:2] if len(isin) >= 2 else "US"
+                pais_nome = MAPA_PAISES_IRS.get(
+                    c_code, f"{c_code} - Estrangeiro"
+                )
+
+                dados_apuramento["divs_total_liquido"] += net
+                dados_apuramento["divs_total_bruto"] += gross
+
+                dados_apuramento["dividend_records"].append(
+                    {
+                        "Data": dt.strftime("%Y-%m-%d")
+                        if pd.notnull(dt)
+                        else "2026",
+                        "Ano_Mes": dt.strftime("%Y-%m")
+                        if pd.notnull(dt)
+                        else "2026",
+                        "Corretora": "Trading 212",
+                        "Ticker": str(r.get("Ticker", "")),
+                        "Nome": str(r.get("Name", r.get("Ticker", ""))),
+                        "País": pais_nome,
+                        "Valor_Bruto": round(gross, 2),
+                        "Retencao_Fonte": round(wht, 2),
+                        "Valor_Liquido": round(net, 2),
+                    }
+                )
+
+            # Custos
             c_conv = pd.to_numeric(
                 df_raw.get("Currency conversion fee", 0.0), errors="coerce"
             ).sum()
@@ -448,7 +569,7 @@ def processar_ficheiro_importado(ficheiro):
             ).sum()
             dados_apuramento["fees_total"] = float(c_conv + c_ftt)
 
-            # Vendas realizadas e IRS Anexo J
+            # 2. Vendas e IRS Anexo J
             sells = df_raw[
                 df_raw["Action"].isin(["Market sell", "Limit sell"])
             ].copy()
@@ -494,7 +615,7 @@ def processar_ficheiro_importado(ficheiro):
                     }
                 )
 
-            # Posições vivas (Holdings)
+            # 3. Posições Vivas (Holdings)
             df_sorted = df_raw.sort_values("Time (UTC)", ascending=True)
             carteira_calc = {}
             for _, r in df_sorted.iterrows():
@@ -643,12 +764,26 @@ def obter_dados_mercado(tickers):
 # Sidebar: Gestão de Carteira & Importação
 # ---------------------------------------------------------
 df_portfolio = carregar_portfolio()
+df_vendas_salvas = carregar_vendas_fechadas()
+df_divs_salvos = carregar_dividendos()
 stats_hist = carregar_stats_historico()
 taxa_eur_usd = obter_taxa_eur_usd()
 
 with st.sidebar:
     st.header("⚙️ Gestor de Carteira")
     st.caption(f"💱 Câmbio atual: **1 EUR = {taxa_eur_usd:.4f} USD**")
+
+    # SELETOR GLOBAL DE RETENÇÃO FISCAL
+    st.markdown("### 🏛️ Opção Fiscal de Dividendos")
+    modo_retencao = st.radio(
+        "Visualizar Dividendos:",
+        ["Sem Retenção (Líquido)", "Com Retenção (Bruto)"],
+        index=0,
+        help="Líquido: o valor real creditado na tua conta.\nBruto: o dividendo pago pela empresa antes do imposto retido na fonte.",
+    )
+    is_bruto = "Bruto" in modo_retencao
+
+    st.markdown("---")
 
     # 1. IMPORTAR EXCEL (XTB) OU CSV (TRADING 212)
     with st.expander("📥 Importar Relatório (XTB / T212)", expanded=True):
@@ -657,7 +792,7 @@ with st.sidebar:
             "Ficheiro", type=["xlsx", "xls", "csv"], key="file_up"
         )
         tipo_import = st.radio(
-            "Método de Importação:",
+            "Método para Carteira Atual:",
             ["Fundir / Adicionar", "Substituir Carteira"],
             index=0,
         )
@@ -668,6 +803,7 @@ with st.sidebar:
                 if erro:
                     st.error(erro)
                 elif res_dados is not None:
+                    # 1. Holdings
                     df_novo = res_dados["holdings"]
                     if not df_novo.empty:
                         if tipo_import == "Substituir Carteira":
@@ -680,14 +816,30 @@ with st.sidebar:
                             )
                         guardar_portfolio(df_portfolio)
 
-                    # Atualiza os dados históricos se existirem no ficheiro
-                    if res_dados["realized_pl"] > 0:
-                        stats_hist["ganho_realizado"] = round(
-                            res_dados["realized_pl"], 2
+                    # 2. Vendas para IRS (Merge Permanente)
+                    if res_dados["closed_trades"]:
+                        df_novas_vendas = pd.DataFrame(
+                            res_dados["closed_trades"]
                         )
-                    if res_dados["divs_total"] > 0:
-                        stats_hist["divs_recebidos"] = round(
-                            res_dados["divs_total"], 2
+                        df_vendas_salvas = guardar_vendas_fechadas(
+                            df_novas_vendas
+                        )
+
+                    # 3. Dividendos (Merge Permanente)
+                    if res_dados["dividend_records"]:
+                        df_novos_divs = pd.DataFrame(
+                            res_dados["dividend_records"]
+                        )
+                        df_divs_salvos = guardar_dividendos(df_novos_divs)
+
+                    # 4. Atualização de totais
+                    if not df_divs_salvos.empty:
+                        stats_hist["divs_recebidos"] = float(
+                            df_divs_salvos["Valor_Liquido"].sum()
+                        )
+                    if not df_vendas_salvas.empty:
+                        stats_hist["ganho_realizado"] = float(
+                            df_vendas_salvas["Mais/Menos-valia (€)"].sum()
                         )
                     if res_dados["fees_total"] > 0:
                         stats_hist["custos_transacao"] = round(
@@ -695,14 +847,8 @@ with st.sidebar:
                         )
                     guardar_stats_historico(stats_hist)
 
-                    # Guarda vendas para a aba de IRS
-                    if res_dados["closed_trades"]:
-                        st.session_state["irs_trades"] = res_dados[
-                            "closed_trades"
-                        ]
-
                     st.success(
-                        f"Relatório {res_dados['tipo_ficheiro']} processado com sucesso!"
+                        f"Relatório {res_dados['tipo_ficheiro']} importado e consolidado com sucesso!"
                     )
                     st.cache_data.clear()
                     st.rerun()
@@ -866,6 +1012,7 @@ market_data = obter_dados_mercado(tickers_lista)
 dados_processados = []
 distribuicao_mensal_eur = {m: 0.0 for m in range(1, 13)}
 
+# Fator fiscal médio: se for bruto é 1.0, se for líquido desconta retenção estimada (~15% para ações e 0% para UCITS irlandeses)
 for _, row in df_portfolio.iterrows():
     t = row["Ticker"]
     shares = float(row["Shares"])
@@ -905,7 +1052,11 @@ for _, row in df_portfolio.iterrows():
         shares * (price_eur - prev_close_eur) if price_eur > 0 else 0.0
     )
 
-    annual_dividend_eur = shares * (annual_div_native * fator_conversao_eur)
+    # Cálculo com ou sem retenção
+    fator_retencao = 0.85 if (native_currency == "USD" and not is_bruto) else 1.0
+    annual_dividend_eur = (
+        shares * (annual_div_native * fator_conversao_eur) * fator_retencao
+    )
     yoc = (
         (annual_dividend_eur / invested_eur) * 100 if invested_eur > 0 else 0.0
     )
@@ -915,6 +1066,7 @@ for _, row in df_portfolio.iterrows():
             monthly_sched_native.get(m, 0.0)
             * fator_conversao_eur
             * shares
+            * fator_retencao
         )
 
     dados_processados.append(
@@ -932,7 +1084,7 @@ for _, row in df_portfolio.iterrows():
             "Retorno Total (€)": unrealized_gl_eur,
             "Retorno Total %": total_return_pct,
             "Dividendo Anual (€)": annual_dividend_eur,
-            "Dividend Yield %": div_yield,
+            "Dividend Yield %": div_yield * (fator_retencao),
             "Yield on Cost %": yoc,
         }
     )
@@ -976,6 +1128,9 @@ else:
 # ---------------------------------------------------------
 st.title("💼 Dividend Portfolio Tracker (Consolidado em €)")
 
+rotulo_div = "Dividendos Anuais (Brutos)" if is_bruto else "Dividendos Anuais (Líquidos)"
+rotulo_yield = "Yield Bruto / YoC" if is_bruto else "Yield Líquido / YoC"
+
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric(
     label="Valor de Mercado",
@@ -992,12 +1147,12 @@ m3.metric(
     delta=f"{total_return_overall_pct:+.2f}%",
 )
 m4.metric(
-    label="Dividendos Anuais",
+    label=rotulo_div,
     value=f"{total_annual_dividend:,.2f} {MOEDA_BASE}",
     delta=f"{total_annual_dividend/12:,.2f} {MOEDA_BASE}/mês",
 )
 m5.metric(
-    label="Yield Médio / YoC",
+    label=rotulo_yield,
     value=f"{portfolio_yield:.2f}%",
     delta=f"{portfolio_yoc:.2f}% YoC",
 )
@@ -1095,7 +1250,7 @@ with tab_holdings:
             )
             st.plotly_chart(fig_pie, use_container_width=True)
 
-# TAB 2: Desempenho (Estilo getquin / Parqet com HTML Seguro)
+# TAB 2: Desempenho (Estilo getquin / Parqet)
 with tab_desempenho:
     col_centro, col_vazia = st.columns([1.18, 1.82])
 
@@ -1103,29 +1258,43 @@ with tab_desempenho:
         ganho_preco_eur = total_unrealized_gl
         ganho_preco_pct = total_return_overall_pct
 
+        # Define valor de dividendos conforme seleção
+        if not df_divs_salvos.empty:
+            divs_valor_card = (
+                float(df_divs_salvos["Valor_Bruto"].sum())
+                if is_bruto
+                else float(df_divs_salvos["Valor_Liquido"].sum())
+            )
+        else:
+            divs_valor_card = (
+                601.38
+                if is_bruto
+                else float(stats_hist.get("divs_recebidos", 524.68))
+            )
+
         with st.expander(
             "⚙️ Configurar Histórico Realizado e Custos", expanded=False
         ):
             c_divs_rec = st.number_input(
-                "Dividendos Já Recebidos (€)",
+                "Dividendos Recebidos (€)",
                 min_value=0.0,
-                value=float(stats_hist.get("divs_recebidos", 634.73)),
+                value=float(divs_valor_card),
                 step=10.0,
             )
             c_ganho_realizado = st.number_input(
-                "Ganhos Realizados (Vendas Anteriores) (€)",
+                "Ganhos Realizados (€)",
                 min_value=0.0,
-                value=float(stats_hist.get("ganho_realizado", 1445.11)),
+                value=float(stats_hist.get("ganho_realizado", 1602.89)),
                 step=50.0,
             )
             c_custos_transacao = st.number_input(
-                "Custos de Transação / Comissões (€)",
+                "Custos de Transação (€)",
                 min_value=0.0,
                 value=float(stats_hist.get("custos_transacao", 25.39)),
                 step=1.0,
             )
             c_trocas = st.number_input(
-                "Custos de Câmbio / Trocas (€)",
+                "Custos de Câmbio (€)",
                 min_value=0.0,
                 value=float(stats_hist.get("trocas", 0.0)),
                 step=1.0,
@@ -1148,7 +1317,7 @@ with tab_desempenho:
                     }
                 )
                 guardar_stats_historico(stats_hist)
-                st.success("Guardado!")
+                st.success("Guardado com sucesso!")
                 st.rerun()
 
         divs_pct = (
@@ -1173,7 +1342,6 @@ with tab_desempenho:
         tir_irr = float(stats_hist.get("tir", 14.92))
         twr = float(stats_hist.get("twr", 16.47))
 
-        # Renderização HTML sem indentação de código
         card_html = f"""<div style="background-color: #11141a; border: 1px solid #21262d; border-radius: 12px; padding: 22px; color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 440px;">
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
 <div>
@@ -1209,7 +1377,7 @@ with tab_desempenho:
 </div>
 </div>
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 14px;">
-<span style="color: #c9d1d9;">Dividendos <span style="font-size: 12px; color: #6b7280;">ⓘ</span></span>
+<span style="color: #c9d1d9;">Dividendos {'(Bruto)' if is_bruto else '(Líquido)'} <span style="font-size: 12px; color: #6b7280;">ⓘ</span></span>
 <div>
 <span style="color: #00d084; font-weight: 600; margin-right: 14px;">↗ {divs_pct:.2f}%</span>
 <span style="font-weight: 700;">€ {c_divs_rec:,.2f}</span>
@@ -1255,7 +1423,8 @@ with tab_desempenho:
 
 # TAB 3: Dividend Insights
 with tab_insights:
-    st.subheader("Análise dos Proventos Passivos (em €)")
+    st.subheader(f"Análise dos Proventos Passivos ({modo_retencao})")
+
     c1, c2 = st.columns([2, 1])
 
     with c1:
@@ -1267,7 +1436,7 @@ with tab_insights:
                 x="Ticker",
                 y="Dividendo Anual (€)",
                 text_auto=".2f",
-                title="Projeção de Renda Anual por Ativo (€)",
+                title=f"Projeção Anual por Ativo ({modo_retencao})",
                 color="Dividendo Anual (€)",
                 color_continuous_scale="Greens",
             )
@@ -1295,11 +1464,11 @@ with tab_insights:
             else "N/A"
         )
         st.write(f"• **Maior Pagador:** `{maior_pagador}`")
-        st.write(f"• **Dividend Yield da Carteira:** `{portfolio_yield:.2f}%`")
+        st.write(f"• **Dividend Yield:** `{portfolio_yield:.2f}%`")
         st.write(f"• **Yield on Cost (YoC):** `{portfolio_yoc:.2f}%`")
 
     st.markdown("---")
-    st.subheader("Calendário de Pagamentos (Meses Reais em €)")
+    st.subheader("Calendário de Pagamentos Previsto (€)")
     meses = [
         "Jan",
         "Fev",
@@ -1339,6 +1508,41 @@ with tab_insights:
         yaxis_title=f"Rendimento ({MOEDA_BASE})",
     )
     st.plotly_chart(fig_months, use_container_width=True)
+
+    # Histórico detalhado de dividendos das corretoras
+    if not df_divs_salvos.empty:
+        st.markdown("---")
+        st.subheader("📋 Histórico Real de Dividendos Recebidos (XTB + Trading 212)")
+
+        col_bruto_tot = df_divs_salvos["Valor_Bruto"].sum()
+        col_wht_tot = df_divs_salvos["Retencao_Fonte"].sum()
+        col_liq_tot = df_divs_salvos["Valor_Liquido"].sum()
+
+        m_d1, m_d2, m_d3 = st.columns(3)
+        m_d1.metric("Total Bruto", f"{col_bruto_tot:,.2f} €")
+        m_d2.metric(
+            "Retenção na Fonte Total",
+            f"-{col_wht_tot:,.2f} €",
+            delta=f"{(col_wht_tot/col_bruto_tot)*100:.1f}% retido na fonte"
+            if col_bruto_tot > 0
+            else "",
+        )
+        m_d3.metric("Total Líquido Recebido", f"{col_liq_tot:,.2f} €")
+
+        df_divs_display = df_divs_salvos.sort_values(
+            by="Data", ascending=False
+        ).copy()
+        st.dataframe(
+            df_divs_display.style.format(
+                {
+                    "Valor_Bruto": "{:,.2f} €",
+                    "Retencao_Fonte": "{:,.2f} €",
+                    "Valor_Liquido": "{:,.2f} €",
+                }
+            ),
+            use_container_width=True,
+            height=320,
+        )
 
 # TAB 4: Snowball Simulator
 with tab_forecast:
@@ -1431,64 +1635,109 @@ with tab_forecast:
         )
         st.plotly_chart(fig_sim, use_container_width=True)
 
-        st.info(
-            f"💡 Em **{anos} anos**, o teu portfólio está projetado para atingir **{proj_valor[-1]:,.2f} {MOEDA_BASE}**, "
-            f"gerando um rendimento anual em dividendos de **{proj_dividendos[-1]:,.2f} {MOEDA_BASE}** "
-            f"(~**{proj_dividendos[-1]/12:,.2f} {MOEDA_BASE} por mês**)."
-        )
-
 # TAB 5: Fiscal (IRS Anexo J & Anexo G)
 with tab_irs:
-    st.subheader("📑 Apuramento de Mais-Valias para o IRS")
-    st.caption(
-        "Discriminação automática das vendas executadas para preenchimento do **Anexo J (Quadro 9.2A)** e **Anexo G**."
+    st.subheader("📑 Apuramento Consolidado para IRS (XTB + Trading 212)")
+
+    aba_irs_maisvalias, aba_irs_dividendos = st.tabs(
+        [
+            "📈 Mais-Valias (Quadro 9.2A / Anexo G)",
+            "💰 Rendimentos de Capitais (Quadro 8 - Dividendos)",
+        ]
     )
 
-    lista_vendas = st.session_state.get("irs_trades", [])
+    with aba_irs_maisvalias:
+        if not df_vendas_salvas.empty:
+            c_v1, c_v2, c_v3 = st.columns(3)
+            tot_alienado = df_vendas_salvas["Valor Venda (€)"].sum()
+            tot_aquisicao = df_vendas_salvas["Valor Compra (€)"].sum()
+            tot_saldo_mv = df_vendas_salvas["Mais/Menos-valia (€)"].sum()
 
-    if lista_vendas:
-        df_irs = pd.DataFrame(lista_vendas)
+            c_v1.metric("Total Alienado (€)", f"{tot_alienado:,.2f} €")
+            c_v2.metric("Total de Aquisição (€)", f"{tot_aquisicao:,.2f} €")
+            c_v3.metric(
+                "Saldo de Mais-Valias Líquidas",
+                f"{tot_saldo_mv:+,.2f} €",
+                delta=f"{len(df_vendas_salvas)} operações registadas",
+            )
 
-        c_vendas, c_lucro = st.columns(2)
-        total_vendas_eur = df_irs["Valor Venda (€)"].sum()
-        total_pl_irs = df_irs["Mais/Menos-valia (€)"].sum()
+            corretora_filtro = st.selectbox(
+                "Filtrar por Corretora:",
+                ["Todas", "Trading 212", "XTB"],
+                key="filtro_corr",
+            )
+            df_mostrar_vendas = df_vendas_salvas.copy()
+            if corretora_filtro != "Todas":
+                df_mostrar_vendas = df_mostrar_vendas[
+                    df_mostrar_vendas["Corretora"] == corretora_filtro
+                ]
 
-        c_vendas.metric("Total Alienado", f"{total_vendas_eur:,.2f} €")
-        c_lucro.metric(
-            "Saldo de Mais-Valias Líquidas",
-            f"{total_pl_irs:+,.2f} €",
-            delta=f"{len(df_irs)} operações realizadas",
-        )
-
-        st.dataframe(
-            df_irs.style.format(
-                {
-                    "Valor Venda (€)": "{:,.2f} €",
-                    "Valor Compra (€)": "{:,.2f} €",
-                    "Mais/Menos-valia (€)": "{:+,.2f} €",
-                }
-            ).map(
-                lambda v: (
-                    "color: #00e676;"
-                    if v > 0
-                    else "color: #ff5252;"
-                    if v < 0
-                    else ""
+            st.dataframe(
+                df_mostrar_vendas.sort_values(
+                    by="Data Venda", ascending=False
+                ).style.format(
+                    {
+                        "Valor Venda (€)": "{:,.2f} €",
+                        "Valor Compra (€)": "{:,.2f} €",
+                        "Mais/Menos-valia (€)": "{:+,.2f} €",
+                    }
+                ).map(
+                    lambda v: (
+                        "color: #00e676;"
+                        if v > 0
+                        else "color: #ff5252;"
+                        if v < 0
+                        else ""
+                    ),
+                    subset=["Mais/Menos-valia (€)"],
                 ),
-                subset=["Mais/Menos-valia (€)"],
-            ),
-            use_container_width=True,
-            height=380,
-        )
+                use_container_width=True,
+                height=380,
+            )
 
-        csv_irs = df_irs.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="📥 Descarregar Tabela para Apoio ao IRS (CSV)",
-            data=csv_irs,
-            file_name="apuramento_mais_valias_irs.csv",
-            mime="text/csv",
-        )
-    else:
-        st.info(
-            "Carrega o teu ficheiro da **XTB (`.xlsx`)** ou da **Trading 212 (`.csv`)** na barra lateral para carregar automaticamente o histórico de vendas para o IRS."
-        )
+            csv_vendas = df_vendas_salvas.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Descarregar Tabela de Mais-Valias (CSV)",
+                data=csv_vendas,
+                file_name="mais_valias_irs_anexo_j_g.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info(
+                "Importa os extratos da **XTB** e da **Trading 212** na barra lateral para gerar o relatório fiscal."
+            )
+
+    with aba_irs_dividendos:
+        if not df_divs_salvos.empty:
+            st.markdown("#### Discriminação de Dividendos no Estrangeiro (Anexo J - Quadro 8)")
+            # Agrupamento por País para preenchimento direto do Quadro 8
+            resumo_pais = (
+                df_divs_salvos.groupby("País")[
+                    ["Valor_Bruto", "Retencao_Fonte", "Valor_Liquido"]
+                ]
+                .sum()
+                .reset_index()
+            )
+
+            st.dataframe(
+                resumo_pais.style.format(
+                    {
+                        "Valor_Bruto": "{:,.2f} €",
+                        "Retencao_Fonte": "{:,.2f} €",
+                        "Valor_Liquido": "{:,.2f} €",
+                    }
+                ),
+                use_container_width=True,
+            )
+
+            csv_divs_irs = df_divs_salvos.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Descarregar Dividendos para IRS (CSV)",
+                data=csv_divs_irs,
+                file_name="dividendos_estrangeiro_anexo_j.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info(
+                "Nenhum registo de dividendos disponível para o Quadro 8. Carrega os extratos na barra lateral."
+            )
